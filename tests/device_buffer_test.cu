@@ -85,6 +85,17 @@ void test_bounds_and_cuda_errors() {
     }
     require(bounds_error_seen, "out-of-bounds copy did not throw");
 
+    cuvit::DeviceBuffer<int> overlapping(8);
+    bool overlap_error_seen = false;
+    try {
+        overlapping.copy_from_device(overlapping, 4, 0, 2);
+    } catch (const std::invalid_argument&) {
+        overlap_error_seen = true;
+    }
+    require(overlap_error_seen, "overlapping device-to-device copy did not throw");
+
+    overlapping.copy_from_device(overlapping, 4, 0, 4);
+
     bool cuda_error_seen = false;
     try {
         CUVIT_CUDA_CHECK(cudaErrorInvalidValue);

@@ -36,6 +36,11 @@ template <typename T> class DeviceBuffer final {
         return *this;
     }
 
+    /// Makes the buffer own exactly @p count elements.
+    ///
+    /// Requesting the size the buffer already has is a no-op: the existing
+    /// allocation and its current contents are kept. Call fill_zero() or
+    /// reset() first when fresh storage is required.
     void allocate(std::size_t count) {
         if (count == size_) {
             return;
@@ -85,6 +90,15 @@ template <typename T> class DeviceBuffer final {
         validate_range(count, destination_offset);
         if (count == 0) {
             return;
+        }
+        if (this == &source) {
+            const std::size_t distance = source_offset > destination_offset
+                                             ? source_offset - destination_offset
+                                             : destination_offset - source_offset;
+            if (distance < count) {
+                throw std::invalid_argument(
+                    "DeviceBuffer device-to-device copy ranges must not overlap");
+            }
         }
 
         CUVIT_CUDA_CHECK(cudaMemcpy(data_ + destination_offset, source.data_ + source_offset,

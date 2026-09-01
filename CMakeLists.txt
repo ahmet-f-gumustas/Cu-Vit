@@ -18,15 +18,21 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 find_package(CUDAToolkit REQUIRED)
 
 option(CUVIT_BUILD_TESTS "Build the Cu-Vit test suite" ON)
 
-function(cuvit_enable_warnings target_name)
+function(cuvit_apply_common_options target_name)
+    set(cuvit_debug_config "$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>")
+
     target_compile_options(${target_name}
         PRIVATE
             "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
             "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
+            # Source correlation for compute-sanitizer and Nsight.
+            "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,${cuvit_debug_config}>:-lineinfo>"
     )
 endfunction()
 
@@ -41,27 +47,26 @@ target_include_directories(cuvit
 )
 
 target_link_libraries(cuvit PUBLIC CUDA::cudart)
-cuvit_enable_warnings(cuvit)
+cuvit_apply_common_options(cuvit)
 
 set_target_properties(cuvit PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
 )
 
 add_executable(cu-vit src/main.cpp)
 target_link_libraries(cu-vit PRIVATE cuvit)
-cuvit_enable_warnings(cu-vit)
+cuvit_apply_common_options(cu-vit)
 
 if(CUVIT_BUILD_TESTS)
-    include(CTest)
+    enable_testing()
 
     add_executable(device_buffer_test tests/device_buffer_test.cu)
     target_link_libraries(device_buffer_test PRIVATE cuvit)
-    cuvit_enable_warnings(device_buffer_test)
+    cuvit_apply_common_options(device_buffer_test)
     add_test(NAME device_buffer_test COMMAND device_buffer_test)
 
     add_executable(vector_add_test tests/vector_add_test.cu)
     target_link_libraries(vector_add_test PRIVATE cuvit)
-    cuvit_enable_warnings(vector_add_test)
+    cuvit_apply_common_options(vector_add_test)
     add_test(NAME vector_add_test COMMAND vector_add_test)
 endif()
