@@ -60,13 +60,17 @@ cuvit_apply_common_options(cu-vit)
 if(CUVIT_BUILD_TESTS)
     enable_testing()
 
-    add_executable(device_buffer_test tests/device_buffer_test.cu)
-    target_link_libraries(device_buffer_test PRIVATE cuvit)
-    cuvit_apply_common_options(device_buffer_test)
-    add_test(NAME device_buffer_test COMMAND device_buffer_test)
+    set(cuvit_test_names
+        device_buffer_test
+        host_buffer_test
+        stream_test
+        vector_add_test
+    )
 
-    add_executable(vector_add_test tests/vector_add_test.cu)
-    target_link_libraries(vector_add_test PRIVATE cuvit)
-    cuvit_apply_common_options(vector_add_test)
-    add_test(NAME vector_add_test COMMAND vector_add_test)
+    foreach(cuvit_test_name IN LISTS cuvit_test_names)
+        add_executable(${cuvit_test_name} tests/${cuvit_test_name}.cu)
+        target_link_libraries(${cuvit_test_name} PRIVATE cuvit)
+        cuvit_apply_common_options(${cuvit_test_name})
+        add_test(NAME ${cuvit_test_name} COMMAND ${cuvit_test_name})
+    endforeach()
 endif()

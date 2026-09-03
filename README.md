@@ -16,12 +16,19 @@ them behind a high-level deep learning framework.
 - CMake-based C++17/CUDA 17 build with configurable GPU architecture.
 - Context-rich CUDA runtime error reporting through `CUVIT_CUDA_CHECK`.
 - Move-only `DeviceBuffer<T>` with RAII ownership, checked host/device copies,
-  device-to-device copies, bounds validation, and zero fill.
-- Active CUDA device discovery and capability reporting.
+  device-to-device copies, bounds validation, and zero fill. Each buffer records
+  the device it was allocated on, frees on that device, and rejects cross-device
+  and self-overlapping copies.
+- Move-only `HostBuffer<T>` holding page-locked host memory for staging.
+- Move-only `Stream` owning a non-blocking CUDA stream.
+- Asynchronous `_async` counterparts for every transfer, so a full
+  host-to-device, kernel, device-to-host path can run on one stream.
+- Active CUDA device discovery and capability reporting, cached per device.
 - A vector-add kernel used to verify compilation, launch, synchronization, and data
   transfer end to end.
 - CTest coverage for memory ownership, data transfers, bounds checks, error
-  propagation, and kernel correctness across boundary sizes.
+  propagation, page-locked allocation, stream lifetime, asynchronous pipelines,
+  and kernel correctness across boundary sizes.
 - Clean `compute-sanitizer` memcheck runs for the executable and tests.
 
 ## Why Cu-Vit?
@@ -138,9 +145,31 @@ Run GPU memory validation with:
 
 ```bash
 compute-sanitizer --tool memcheck --error-exitcode=1 ./build/device_buffer_test
+compute-sanitizer --tool memcheck --error-exitcode=1 ./build/host_buffer_test
+compute-sanitizer --tool memcheck --error-exitcode=1 ./build/stream_test
 compute-sanitizer --tool memcheck --error-exitcode=1 ./build/vector_add_test
 compute-sanitizer --tool memcheck --error-exitcode=1 ./build/cu-vit
 ```
+
+## Transfers
+
+`cudaMemcpyAsync` is only asynchronous when the host side is page-locked. A copy
+issued from pageable memory is staged through a driver bounce buffer and blocks
+the caller, so pair the `_async` transfers with `HostBuffer<T>`:
+
+```cpp
+cuvit::Stream stream;
+cuvit::HostBuffer<float> host(count);
+cuvit::DeviceBuffer<float> device(count);
+
+device.copy_from_host_async(host.data(), host.size(), stream.get());
+cuvit::launch_vector_add(a, b, out, count, stream.get());
+device.copy_to_host_async(host.data(), host.size(), stream.get());
+stream.synchronize();
+```
+
+The host buffer and the device buffer must both outlive the stream
+synchronization.
 
 ## Project structure
 
@@ -150,6 +179,8 @@ Cu-Vit/
 │   ├── cuda_check.hpp       # CUDA error handling
 │   ├── device_buffer.hpp    # Move-only GPU allocation owner
 │   ├── device_info.hpp      # Active device metadata
+│   ├── host_buffer.hpp      # Move-only page-locked host memory
+│   ├── stream.hpp           # Move-only CUDA stream owner
 │   └── vector_add.hpp       # Smoke-kernel interface
 ├── src/
 │   ├── kernels/             # CUDA kernels
@@ -165,6 +196,7 @@ Cu-Vit/
 
 - [x] Project skeleton and CMake CUDA build.
 - [x] Device-memory utilities and CUDA error checking.
+- [x] Streams, page-locked host staging, and asynchronous transfers.
 - [ ] Tensor shape, layout, and view abstractions.
 - [ ] Tiled GEMM kernel with a cuBLAS reference.
 - [ ] LayerNorm, GELU, and softmax kernels.
