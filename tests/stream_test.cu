@@ -3,24 +3,21 @@
 #include "cuvit/host_buffer.hpp"
 #include "cuvit/stream.hpp"
 #include "cuvit/vector_add.hpp"
+#include "reference/elementwise.hpp"
+#include "test_utils.hpp"
 
 #include <cuda_runtime_api.h>
 
-#include <cmath>
 #include <cstddef>
-#include <exception>
-#include <iostream>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace {
 
-void require(bool condition, const char* message) {
-    if (!condition) {
-        throw std::runtime_error(message);
-    }
-}
+using cuvit::testing::DataGenerator;
+using cuvit::testing::require;
 
 void test_stream_lifetime() {
     cuvit::Stream stream;
@@ -54,10 +51,12 @@ void test_async_pipeline() {
     cuvit::HostBuffer<float> left(element_count);
     cuvit::HostBuffer<float> right(element_count);
     cuvit::HostBuffer<float> output(element_count);
-    for (std::size_t index = 0; index < element_count; ++index) {
-        left[index] = std::sin(static_cast<float>(index) * 0.1F);
-        right[index] = std::cos(static_cast<float>(index) * 0.2F);
-    }
+    std::vector<float> expected(element_count);
+
+    DataGenerator generator(7);
+    generator.normal(left.data(), element_count);
+    generator.normal(right.data(), element_count);
+    cuvit::reference::vector_add(left.data(), right.data(), expected.data(), element_count);
     output.fill_zero();
 
     cuvit::DeviceBuffer<float> device_left(element_count);
@@ -74,12 +73,8 @@ void test_async_pipeline() {
     device_output.copy_to_host_async(output.data(), output.size(), stream.get());
     stream.synchronize();
 
-    for (std::size_t index = 0; index < element_count; ++index) {
-        const float expected = left[index] + right[index];
-        if (std::abs(output[index] - expected) > 1.0e-6F) {
-            throw std::runtime_error("async pipeline result differs from the CPU reference");
-        }
-    }
+    cuvit::testing::require_exact(output.data(), expected.data(), element_count,
+                                  "async pipeline result differs from the CPU reference");
 }
 
 void test_async_device_to_device() {
@@ -89,9 +84,7 @@ void test_async_device_to_device() {
 
     cuvit::HostBuffer<int> input(element_count);
     cuvit::HostBuffer<int> output(element_count);
-    for (std::size_t index = 0; index < element_count; ++index) {
-        input[index] = static_cast<int>(index) - 40;
-    }
+    DataGenerator(11).integers(input.data(), element_count, -1000, 1000);
     output.fill_zero();
 
     cuvit::DeviceBuffer<int> source(element_count);
@@ -102,11 +95,8 @@ void test_async_device_to_device() {
     destination.copy_to_host_async(output.data(), output.size(), stream.get());
     stream.synchronize();
 
-    for (std::size_t index = 0; index < element_count; ++index) {
-        if (output[index] != input[index]) {
-            throw std::runtime_error("async device-to-device copy changed the data");
-        }
-    }
+    cuvit::testing::require_exact(output.data(), input.data(), element_count,
+                                  "async device-to-device copy changed the data");
 
     bool overlap_error_seen = false;
     try {
@@ -141,11 +131,8 @@ void test_streams_are_independent() {
     cuvit::HostBuffer<float> readback(element_count);
     readback.fill_zero();
     b.copy_to_host(readback.data(), readback.size());
-    for (std::size_t index = 0; index < element_count; ++index) {
-        if (readback[index] != host[index]) {
-            throw std::runtime_error("work queued on a second stream did not complete");
-        }
-    }
+    cuvit::testing::require_exact(readback.data(), host.data(), element_count,
+                                  "work queued on a second stream did not complete");
 }
 
 void test_buffer_reports_its_device() {
@@ -165,22 +152,14 @@ void test_buffer_reports_its_device() {
 
 } // namespace
 
-int main() {
-    static_assert(!std::is_copy_constructible<cuvit::Stream>::value, "stream must be move-only");
-    static_assert(std::is_nothrow_move_constructible<cuvit::Stream>::value,
-                  "stream move must be noexcept");
+static_assert(!std::is_copy_constructible<cuvit::Stream>::value, "stream must be move-only");
+static_assert(std::is_nothrow_move_constructible<cuvit::Stream>::value,
+              "stream move must be noexcept");
 
-    try {
-        test_stream_lifetime();
-        test_async_pipeline();
-        test_async_device_to_device();
-        test_streams_are_independent();
-        test_buffer_reports_its_device();
-        CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
-        std::cout << "stream_test: PASS\n";
-        return 0;
-    } catch (const std::exception& error) {
-        std::cerr << "stream_test: FAIL: " << error.what() << '\n';
-        return 1;
-    }
-}
+CUVIT_TEST_MAIN("stream_test", {
+    test_stream_lifetime();
+    test_async_pipeline();
+    test_async_device_to_device();
+    test_streams_are_independent();
+    test_buffer_reports_its_device();
+})

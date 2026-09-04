@@ -1,24 +1,19 @@
 #include "cuvit/cuda_check.hpp"
 #include "cuvit/device_buffer.hpp"
 #include "cuvit/host_buffer.hpp"
+#include "test_utils.hpp"
 
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
 #include <cstddef>
-#include <exception>
-#include <iostream>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
 
 namespace {
 
-void require(bool condition, const char* message) {
-    if (!condition) {
-        throw std::runtime_error(message);
-    }
-}
+using cuvit::testing::require;
 
 bool is_pinned(const void* pointer) {
     cudaPointerAttributes attributes{};
@@ -116,23 +111,15 @@ void test_round_trip_through_device() {
 
 } // namespace
 
-int main() {
-    static_assert(!std::is_copy_constructible<cuvit::HostBuffer<float>>::value,
-                  "buffer must be move-only");
-    static_assert(std::is_nothrow_move_constructible<cuvit::HostBuffer<float>>::value,
-                  "buffer move must be noexcept");
+static_assert(!std::is_copy_constructible<cuvit::HostBuffer<float>>::value,
+              "buffer must be move-only");
+static_assert(std::is_nothrow_move_constructible<cuvit::HostBuffer<float>>::value,
+              "buffer move must be noexcept");
 
-    try {
-        test_allocation_is_page_locked();
-        test_element_access_and_fill();
-        test_allocate_keeps_contents_at_the_same_size();
-        test_move_semantics();
-        test_round_trip_through_device();
-        CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
-        std::cout << "host_buffer_test: PASS\n";
-        return 0;
-    } catch (const std::exception& error) {
-        std::cerr << "host_buffer_test: FAIL: " << error.what() << '\n';
-        return 1;
-    }
-}
+CUVIT_TEST_MAIN("host_buffer_test", {
+    test_allocation_is_page_locked();
+    test_element_access_and_fill();
+    test_allocate_keeps_contents_at_the_same_size();
+    test_move_semantics();
+    test_round_trip_through_device();
+})

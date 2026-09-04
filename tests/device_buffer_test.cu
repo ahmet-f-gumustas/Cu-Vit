@@ -1,12 +1,11 @@
 #include "cuvit/cuda_check.hpp"
 #include "cuvit/device_buffer.hpp"
+#include "test_utils.hpp"
 
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
 #include <cstddef>
-#include <exception>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -15,11 +14,7 @@
 
 namespace {
 
-void require(bool condition, const char* message) {
-    if (!condition) {
-        throw std::runtime_error(message);
-    }
-}
+using cuvit::testing::require;
 
 void test_allocation_and_copy() {
     constexpr std::size_t element_count = 1024;
@@ -109,21 +104,13 @@ void test_bounds_and_cuda_errors() {
 
 } // namespace
 
-int main() {
-    static_assert(!std::is_copy_constructible<cuvit::DeviceBuffer<float>>::value,
-                  "buffer must be move-only");
-    static_assert(std::is_nothrow_move_constructible<cuvit::DeviceBuffer<float>>::value,
-                  "buffer move must be noexcept");
+static_assert(!std::is_copy_constructible<cuvit::DeviceBuffer<float>>::value,
+              "buffer must be move-only");
+static_assert(std::is_nothrow_move_constructible<cuvit::DeviceBuffer<float>>::value,
+              "buffer move must be noexcept");
 
-    try {
-        test_allocation_and_copy();
-        test_move_and_zero_fill();
-        test_bounds_and_cuda_errors();
-        CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
-        std::cout << "device_buffer_test: PASS\n";
-        return 0;
-    } catch (const std::exception& error) {
-        std::cerr << "device_buffer_test: FAIL: " << error.what() << '\n';
-        return 1;
-    }
-}
+CUVIT_TEST_MAIN("device_buffer_test", {
+    test_allocation_and_copy();
+    test_move_and_zero_fill();
+    test_bounds_and_cuda_errors();
+})

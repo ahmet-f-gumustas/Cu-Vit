@@ -63,12 +63,14 @@ if(CUVIT_BUILD_TESTS)
     set(cuvit_test_names
         device_buffer_test
         host_buffer_test
+        numerics_test
         stream_test
         vector_add_test
     )
 
     foreach(cuvit_test_name IN LISTS cuvit_test_names)
         add_executable(${cuvit_test_name} tests/${cuvit_test_name}.cu)
+        target_include_directories(${cuvit_test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
         target_link_libraries(${cuvit_test_name} PRIVATE cuvit)
         cuvit_apply_common_options(${cuvit_test_name})
         add_test(NAME ${cuvit_test_name} COMMAND ${cuvit_test_name})
