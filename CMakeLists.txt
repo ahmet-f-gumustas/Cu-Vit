@@ -39,6 +39,7 @@ endfunction()
 add_library(cuvit STATIC
     src/kernels/vector_add.cu
     src/runtime/device_info.cu
+    src/runtime/weights.cpp
 )
 
 target_include_directories(cuvit
@@ -61,11 +62,14 @@ if(CUVIT_BUILD_TESTS)
     enable_testing()
 
     set(cuvit_test_names
+        device_arena_test
         device_buffer_test
         host_buffer_test
         numerics_test
         stream_test
+        tensor_test
         vector_add_test
+        weights_test
     )
 
     foreach(cuvit_test_name IN LISTS cuvit_test_names)

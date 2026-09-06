@@ -21,6 +21,12 @@ them behind a high-level deep learning framework.
   and self-overlapping copies.
 - Move-only `HostBuffer<T>` holding page-locked host memory for staging.
 - Move-only `Stream` owning a non-blocking CUDA stream.
+- Non-owning strided `TensorView<T>` with slicing, axis selection, transposition,
+  and reshaping, expressing the QKV split and per-head attention layouts without
+  copying.
+- `DeviceArena`, a 256-byte-aligned bump allocator placing all 152 ViT-Tiny
+  tensors in one allocation.
+- A versioned weight file format, its loader, and a timm exporter.
 - Asynchronous `_async` counterparts for every transfer, so a full
   host-to-device, kernel, device-to-host path can run on one stream.
 - Active CUDA device discovery and capability reporting, cached per device.
@@ -204,6 +210,41 @@ magnitudes and serves reductions.
 a comparison that silently accepts everything would make every other test pass
 while proving nothing.
 
+## Weights
+
+Weights live in a flat versioned file: a header, a table of entries, then the
+payloads, each aligned to 64 bytes. Reading it needs no third-party parser, and a
+file written by an older exporter is refused by version rather than misread. A
+tensor is fetched by name and checked against the shape the caller expects, since
+a model that quietly ran with a mis-shaped weight would produce plausible output
+and cost far more time than a failed load.
+
+Export a timm checkpoint with:
+
+```bash
+python3 tools/export_vit_weights.py --model vit_tiny_patch16_224 --output vit_tiny.cvw
+```
+
+ViT-Tiny/16 yields 152 tensors totalling 5,717,416 parameters (21.8 MiB of
+payload). The exported values are bit-identical to the PyTorch state dict.
+
+## Memory layout
+
+`DeviceBuffer` owns memory; `TensorView` only describes it. Keeping the two apart
+means slicing and reshaping never raise a question about who frees what, and a
+view stays cheap enough to pass by value.
+
+Strides are explicit rather than implied by the shape, because attention reads
+one buffer through several layouts: a packed QKV projection split into three
+views, and `[tokens, heads, head_dim]` read as `[heads, tokens, head_dim]`. Both
+are stride changes over memory that must not be copied. A view that is no longer
+densely packed reports `is_contiguous() == false`, and `reshape` refuses it
+rather than silently producing a wrong layout.
+
+`DeviceArena` suballocates from a single `DeviceBuffer` with 256-byte alignment,
+matching what `cudaMalloc` itself guarantees. ViT-Tiny's 152 weight tensors then
+cost one allocation instead of 152.
+
 ## Project structure
 
 ```text
@@ -213,12 +254,17 @@ Cu-Vit/
 │   ├── device_buffer.hpp    # Move-only GPU allocation owner
 │   ├── device_info.hpp      # Active device metadata
 │   ├── host_buffer.hpp      # Move-only page-locked host memory
+│   ├── device_arena.hpp     # Aligned bump allocator over one allocation
 │   ├── stream.hpp           # Move-only CUDA stream owner
-│   └── vector_add.hpp       # Smoke-kernel interface
+│   ├── tensor.hpp           # Non-owning strided view
+│   ├── vector_add.hpp       # Smoke-kernel interface
+│   └── weights.hpp          # Weight file format and loader
 ├── src/
 │   ├── kernels/             # CUDA kernels
 │   ├── runtime/             # Runtime and device utilities
 │   └── main.cpp             # Current smoke executable
+├── tools/
+│   └── export_vit_weights.py  # timm checkpoint -> .cvw
 ├── tests/
 │   ├── reference/           # Naive CPU implementations kernels are judged against
 │   ├── test_utils.hpp       # Comparisons, seeded data, test entry point
@@ -234,14 +280,14 @@ Cu-Vit/
 - [x] Device-memory utilities and CUDA error checking.
 - [x] Streams, page-locked host staging, and asynchronous transfers.
 - [x] Test support: seeded data, CPU references, tolerance-aware comparison.
-- [ ] Tensor shape, layout, and view abstractions.
+- [x] Tensor shape, layout, and view abstractions.
+- [x] Versioned weight format and pretrained ViT weight exporter.
 - [ ] Tiled GEMM kernel with a cuBLAS reference.
 - [ ] LayerNorm, GELU, and softmax kernels.
 - [ ] Patch embedding, CLS token, and positional encoding.
 - [ ] Multi-head self-attention.
 - [ ] MLP and transformer encoder block.
 - [ ] Full encoder stack and classification head.
-- [ ] Versioned weight format and pretrained ViT weight exporter.
 - [ ] Image preprocessing and end-to-end inference.
 - [ ] Benchmarks, kernel fusion, and FP16/mixed-precision optimization.
 
