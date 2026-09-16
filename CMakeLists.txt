@@ -6,7 +6,7 @@ endif()
 
 project(
     CuVit
-    VERSION 0.3.0
+    VERSION 0.3.1
     DESCRIPTION "A Vision Transformer inference engine implemented in CUDA C++"
     LANGUAGES CXX CUDA
 )
