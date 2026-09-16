@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="288" viewBox="0 0 760 288" role="img" aria-label="Throughput by batch size. Images per second, Cu-Vit on an RTX 4070 Laptop GPU. The curve flattens once the GPU is full.">
+<rect width="760" height="288" fill="#1a1a19"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<text x="16" y="28" font-size="15" font-weight="600" fill="#ffffff">Throughput by batch size</text>
+<text x="16" y="48" font-size="11.5" fill="#c3c2b7">Images per second, Cu-Vit on an RTX 4070 Laptop GPU. The curve flattens once the GPU is full.</text>
+<line x1="210" y1="56" x2="210" y2="276" stroke="#383835" stroke-width="1"/>
+<text x="200" y="78" font-size="11.5" text-anchor="end" fill="#c3c2b7">64</text>
+<path d="M210,64h447.58a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-447.58z" fill="#3987e5"/>
+<text x="671.58" y="78" font-size="11.5" fill="#ffffff">1,307 img/s</text>
+<text x="200" y="108" font-size="11.5" text-anchor="end" fill="#c3c2b7">32</text>
+<path d="M210,94h450.00a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-450.00z" fill="#3987e5"/>
+<text x="674.00" y="108" font-size="11.5" fill="#ffffff">1,314 img/s</text>
+<text x="200" y="138" font-size="11.5" text-anchor="end" fill="#c3c2b7">16</text>
+<path d="M210,124h428.92a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-428.92z" fill="#3987e5"/>
+<text x="652.92" y="138" font-size="11.5" fill="#ffffff">1,253 img/s</text>
+<text x="200" y="168" font-size="11.5" text-anchor="end" fill="#c3c2b7">8</text>
+<path d="M210,154h368.46a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-368.46z" fill="#3987e5"/>
+<text x="592.46" y="168" font-size="11.5" fill="#ffffff">1,078 img/s</text>
+<text x="200" y="198" font-size="11.5" text-anchor="end" fill="#c3c2b7">4</text>
+<path d="M210,184h320.43a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-320.43z" fill="#3987e5"/>
+<text x="544.43" y="198" font-size="11.5" fill="#ffffff">939 img/s</text>
+<text x="200" y="228" font-size="11.5" text-anchor="end" fill="#c3c2b7">2</text>
+<path d="M210,214h229.56a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-229.56z" fill="#3987e5"/>
+<text x="453.56" y="228" font-size="11.5" fill="#ffffff">676 img/s</text>
+<text x="200" y="258" font-size="11.5" text-anchor="end" fill="#c3c2b7">1</text>
+<path d="M210,244h168.75a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-168.75z" fill="#3987e5"/>
+<text x="392.75" y="258" font-size="11.5" fill="#ffffff">500 img/s</text>
+</g></svg>

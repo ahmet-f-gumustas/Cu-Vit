@@ -62,9 +62,16 @@ std::vector<std::string> VisionTransformer::expected_tensor_names(const VitConfi
     return names;
 }
 
-VisionTransformer::VisionTransformer(const VitConfig& config, const WeightFile& file)
-    : config_(config) {
+std::size_t VisionTransformer::image_elements() const noexcept {
+    return static_cast<std::size_t>(config_.channels) * config_.image_size * config_.image_size;
+}
+
+VisionTransformer::VisionTransformer(const VitConfig& config, const WeightFile& file, int max_batch)
+    : config_(config), max_batch_(max_batch) {
     config_.validate();
+    if (max_batch_ < 1) {
+        throw std::invalid_argument("The maximum batch size must be at least one");
+    }
 
     const Extent embed = config_.embed_dim;
     const Extent tokens = config_.token_count();
@@ -135,47 +142,59 @@ VisionTransformer::VisionTransformer(const VitConfig& config, const WeightFile& 
     head_weight_ = upload(weights_, file, "head.weight", {classes, embed});
     head_bias_ = upload(weights_, file, "head.bias", {classes});
 
-    // Activation scratch. Every buffer is reused across all blocks, so depth
-    // costs no memory.
+    // Activation scratch, sized for the largest batch this model will run.
+    // Every buffer is reused across all blocks, so depth costs no memory.
+    const Extent images = max_batch_;
     std::size_t activation_size = 0;
     const auto reserve_activation = [&activation_size](Extent count) {
         activation_size += DeviceArena::reserved_bytes<float>(static_cast<std::size_t>(count));
     };
-    reserve_activation(patches * patch_elements);        // patch matrix
-    reserve_activation(tokens * embed);                  // token stream
-    reserve_activation(tokens * embed);                  // normalized input
-    reserve_activation(tokens * 3 * embed);              // packed qkv
-    reserve_activation(config_.heads * tokens * tokens); // attention weights
-    reserve_activation(tokens * embed);                  // attention context
-    reserve_activation(tokens * hidden);                 // mlp hidden
+    reserve_activation(images * patches * patch_elements);        // patch matrix
+    reserve_activation(images * tokens * embed);                  // token stream
+    reserve_activation(images * tokens * embed);                  // normalized input
+    reserve_activation(images * tokens * 3 * embed);              // packed qkv
+    reserve_activation(images * config_.heads * tokens * tokens); // attention weights
+    reserve_activation(images * tokens * embed);                  // attention context
+    reserve_activation(images * tokens * hidden);                 // mlp hidden
 
     activations_.reserve(activation_size);
-    patches_ = activations_.allocate_raw<float>(static_cast<std::size_t>(patches * patch_elements));
-    tokens_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * embed));
-    normalized_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * embed));
-    qkv_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * 3 * embed));
-    attention_ =
-        activations_.allocate_raw<float>(static_cast<std::size_t>(config_.heads) * tokens * tokens);
-    context_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * embed));
-    hidden_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * hidden));
+    const auto carve = [this](Extent count) {
+        return activations_.allocate_raw<float>(static_cast<std::size_t>(count));
+    };
+    patches_ = carve(images * patches * patch_elements);
+    tokens_ = carve(images * tokens * embed);
+    normalized_ = carve(images * tokens * embed);
+    qkv_ = carve(images * tokens * 3 * embed);
+    attention_ = carve(images * config_.heads * tokens * tokens);
+    context_ = carve(images * tokens * embed);
+    hidden_ = carve(images * tokens * hidden);
 }
 
-void VisionTransformer::run_block(const BlockWeights& block, float* tokens, cudaStream_t stream) {
+void VisionTransformer::run_block(const BlockWeights& block, float* tokens, int batch,
+                                  cudaStream_t stream) {
     const int token_count = config_.token_count();
     const int embed = config_.embed_dim;
     const int heads = config_.heads;
     const int head_dim = config_.head_dim();
     const int hidden = config_.mlp_hidden;
 
+    // The token rows of a batch are contiguous, so every GEMM that works per
+    // token simply sees more rows. Only attention, which is per image and per
+    // head, needs the batch spelled out.
+    const int rows = batch * token_count;
+    const std::int64_t tokens_per_image = static_cast<std::int64_t>(token_count) * embed;
+    const std::int64_t qkv_per_image = static_cast<std::int64_t>(token_count) * 3 * embed;
+    const std::int64_t attention_per_head = static_cast<std::int64_t>(token_count) * token_count;
+    const int qkv_row = 3 * embed;
+
     // --- Attention -----------------------------------------------------------
-    launch_layer_norm(tokens, block.norm1_gamma, block.norm1_beta, normalized_, token_count, embed,
+    launch_layer_norm(tokens, block.norm1_gamma, block.norm1_beta, normalized_, rows, embed,
                       config_.layer_norm_epsilon, stream);
 
     // One projection produces Q, K and V interleaved as [tokens, 3, heads, head_dim].
-    launch_gemm(normalized_, block.qkv_weight, block.qkv_bias, qkv_, token_count, 3 * embed, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {}, stream);
+    launch_gemm(normalized_, block.qkv_weight, block.qkv_bias, qkv_,
+                gemm_problem(rows, 3 * embed, embed, GemmLayout::kTransposed), stream);
 
-    const int qkv_row = 3 * embed;
     const float* const queries = qkv_;
     const float* const keys = qkv_ + embed;
     const float* const values = qkv_ + 2 * embed;
@@ -183,40 +202,75 @@ void VisionTransformer::run_block(const BlockWeights& block, float* tokens, cuda
     // head dimension.
     const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim));
 
-    // Q @ K^T per head. Both operands are column slices of the packed
-    // projection, reached by leading dimension and batch stride instead of being
-    // gathered into contiguous per-head buffers first.
-    launch_gemm(queries, keys, nullptr, attention_, token_count, token_count, head_dim,
-                GemmLayout::kTransposed, scale, heads, head_dim, head_dim,
-                static_cast<std::int64_t>(token_count) * token_count, qkv_row, qkv_row, token_count,
-                {}, stream);
+    // Q @ K^T per image and per head. Both operands are column slices of the
+    // packed projection, reached by leading dimension and batch stride rather
+    // than gathered into per-head buffers first. The batch index splits as
+    // (image, head) because one head of one image sits at
+    // image * qkv_per_image + head * head_dim, which no single stride reaches.
+    GemmProblem logits = gemm_problem(token_count, token_count, head_dim, GemmLayout::kTransposed);
+    logits.alpha = scale;
+    logits.lda = qkv_row;
+    logits.ldb = qkv_row;
+    logits.ldc = token_count;
+    logits.batch.count = batch * heads;
+    logits.batch.inner = heads;
+    logits.batch.stride_a = head_dim;
+    logits.batch.stride_b = head_dim;
+    logits.batch.stride_c = attention_per_head;
+    logits.batch.outer_stride_a = qkv_per_image;
+    logits.batch.outer_stride_b = qkv_per_image;
+    logits.batch.outer_stride_c = heads * attention_per_head;
+    launch_gemm(queries, keys, nullptr, attention_, logits, stream);
 
-    launch_softmax(attention_, attention_, heads * token_count, token_count, stream);
+    launch_softmax(attention_, attention_, batch * heads * token_count, token_count, stream);
 
     // attention @ V, written straight into the [tokens, heads * head_dim] layout
     // the output projection expects, so no transpose is needed afterwards.
-    launch_gemm(attention_, values, nullptr, context_, token_count, head_dim, token_count,
-                GemmLayout::kNoTranspose, 1.0F, heads,
-                static_cast<std::int64_t>(token_count) * token_count, head_dim, head_dim,
-                token_count, qkv_row, embed, {}, stream);
+    GemmProblem context =
+        gemm_problem(token_count, head_dim, token_count, GemmLayout::kNoTranspose);
+    context.lda = token_count;
+    context.ldb = qkv_row;
+    context.ldc = embed;
+    context.batch.count = batch * heads;
+    context.batch.inner = heads;
+    context.batch.stride_a = attention_per_head;
+    context.batch.stride_b = head_dim;
+    context.batch.stride_c = head_dim;
+    context.batch.outer_stride_a = heads * attention_per_head;
+    context.batch.outer_stride_b = qkv_per_image;
+    context.batch.outer_stride_c = tokens_per_image;
+    launch_gemm(attention_, values, nullptr, context_, context, stream);
 
     // The projection accumulates straight into the residual stream, so the
     // addition costs neither a launch nor a pass over the tokens.
-    launch_gemm(context_, block.proj_weight, block.proj_bias, tokens, token_count, embed, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {/*accumulate=*/true}, stream);
+    GemmProblem projection = gemm_problem(rows, embed, embed, GemmLayout::kTransposed);
+    projection.epilogue.accumulate = true;
+    launch_gemm(context_, block.proj_weight, block.proj_bias, tokens, projection, stream);
 
     // --- Feed forward --------------------------------------------------------
-    launch_layer_norm(tokens, block.norm2_gamma, block.norm2_beta, normalized_, token_count, embed,
+    launch_layer_norm(tokens, block.norm2_gamma, block.norm2_beta, normalized_, rows, embed,
                       config_.layer_norm_epsilon, stream);
-    launch_gemm(normalized_, block.fc1_weight, block.fc1_bias, hidden_, token_count, hidden, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0,
-                {/*accumulate=*/false, /*gelu=*/true}, stream);
-    launch_gemm(hidden_, block.fc2_weight, block.fc2_bias, tokens, token_count, embed, hidden,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {/*accumulate=*/true}, stream);
+
+    GemmProblem first = gemm_problem(rows, hidden, embed, GemmLayout::kTransposed);
+    first.epilogue.gelu = true;
+    launch_gemm(normalized_, block.fc1_weight, block.fc1_bias, hidden_, first, stream);
+
+    GemmProblem second = gemm_problem(rows, embed, hidden, GemmLayout::kTransposed);
+    second.epilogue.accumulate = true;
+    launch_gemm(hidden_, block.fc2_weight, block.fc2_bias, tokens, second, stream);
 }
 
-void VisionTransformer::forward(const float* image, float* logits, cudaStream_t stream) {
-    if (image == nullptr || logits == nullptr) {
+void VisionTransformer::forward(const float* images, float* logits, int batch,
+                                cudaStream_t stream) {
+    if (batch == 0) {
+        return;
+    }
+    if (batch < 0 || batch > max_batch_) {
+        throw std::invalid_argument("This model was built for at most " +
+                                    std::to_string(max_batch_) + " images, but " +
+                                    std::to_string(batch) + " were given");
+    }
+    if (images == nullptr || logits == nullptr) {
         throw std::invalid_argument("Forward pass operands cannot be null");
     }
 
@@ -224,53 +278,66 @@ void VisionTransformer::forward(const float* image, float* logits, cudaStream_t 
     const int patch_count = config_.patch_count();
     const int embed = config_.embed_dim;
     const int patch_elements = config_.patch_elements();
+    const std::int64_t tokens_per_image = static_cast<std::int64_t>(token_count) * embed;
 
     // A patch embedding is a convolution with kernel equal to stride, so it is a
     // gather followed by one GEMM rather than a general convolution.
-    launch_extract_patches(image, patches_, config_.channels, config_.image_size,
+    launch_extract_patches(images, patches_, batch, config_.channels, config_.image_size,
                            config_.image_size, config_.patch_size, stream);
 
-    // The classification token occupies row zero, so the patch embeddings are
-    // written starting at row one and the two never need to be concatenated.
-    launch_gemm(patches_, patch_weight_, patch_bias_, tokens_ + embed, patch_count, embed,
-                patch_elements, GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {}, stream);
+    // The class token occupies row zero of each image, so the patch embeddings
+    // are written starting at row one and the two never need concatenating.
+    GemmProblem embedding =
+        gemm_problem(patch_count, embed, patch_elements, GemmLayout::kTransposed);
+    embedding.batch.count = batch;
+    embedding.batch.stride_a = static_cast<std::int64_t>(patch_count) * patch_elements;
+    embedding.batch.stride_c = tokens_per_image;
+    launch_gemm(patches_, patch_weight_, patch_bias_, tokens_ + embed, embedding, stream);
 
-    CUVIT_CUDA_CHECK(cudaMemcpyAsync(tokens_, class_token_,
-                                     static_cast<std::size_t>(embed) * sizeof(float),
-                                     cudaMemcpyDeviceToDevice, stream));
-
-    launch_add(tokens_, position_embedding_, static_cast<std::int64_t>(token_count) * embed,
-               stream);
+    // One stored class token and one stored positional embedding, broadcast
+    // across the batch rather than replicated in memory.
+    launch_broadcast(tokens_, class_token_, embed, tokens_per_image, batch, stream);
+    launch_add_broadcast(tokens_, position_embedding_, tokens_per_image, batch, stream);
 
     for (const BlockWeights& block : blocks_) {
-        run_block(block, tokens_, stream);
+        run_block(block, tokens_, batch, stream);
     }
 
-    launch_layer_norm(tokens_, final_gamma_, final_beta_, normalized_, token_count, embed,
+    launch_layer_norm(tokens_, final_gamma_, final_beta_, normalized_, batch * token_count, embed,
                       config_.layer_norm_epsilon, stream);
 
-    // Only the classification token feeds the head; timm's default pooling for
-    // this model is 'token', not a mean over the patches.
-    launch_gemm(normalized_, head_weight_, head_bias_, logits, 1, config_.classes, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {}, stream);
+    // Only the class token feeds the head; timm's default pooling for this model
+    // is 'token', not a mean over the patches. One row per image, so the batch is
+    // expressed as a stride rather than as extra rows.
+    GemmProblem head = gemm_problem(1, config_.classes, embed, GemmLayout::kTransposed);
+    head.batch.count = batch;
+    head.batch.stride_a = tokens_per_image;
+    head.batch.stride_c = config_.classes;
+    launch_gemm(normalized_, head_weight_, head_bias_, logits, head, stream);
 }
 
-std::vector<float> VisionTransformer::forward(const std::vector<float>& image) {
-    const std::size_t expected =
-        static_cast<std::size_t>(config_.channels) * config_.image_size * config_.image_size;
-    if (image.size() != expected) {
-        throw std::invalid_argument("The image has " + std::to_string(image.size()) +
-                                    " elements but the model expects " + std::to_string(expected));
+std::vector<float> VisionTransformer::forward(const std::vector<float>& images) {
+    const std::size_t per_image = image_elements();
+    if (per_image == 0 || images.size() % per_image != 0) {
+        throw std::invalid_argument("The input holds " + std::to_string(images.size()) +
+                                    " elements, which is not a whole number of " +
+                                    std::to_string(per_image) + "-element images");
+    }
+    const std::size_t batch = images.size() / per_image;
+    if (batch > static_cast<std::size_t>(max_batch_)) {
+        throw std::invalid_argument("This model was built for at most " +
+                                    std::to_string(max_batch_) + " images, but " +
+                                    std::to_string(batch) + " were given");
     }
 
-    DeviceBuffer<float> device_image(image.size());
-    DeviceBuffer<float> device_logits(static_cast<std::size_t>(config_.classes));
+    DeviceBuffer<float> device_images(images.size());
+    DeviceBuffer<float> device_logits(batch * static_cast<std::size_t>(config_.classes));
     Stream stream;
 
-    device_image.copy_from_host_async(image.data(), image.size(), stream.get());
-    forward(device_image.data(), device_logits.data(), stream.get());
+    device_images.copy_from_host_async(images.data(), images.size(), stream.get());
+    forward(device_images.data(), device_logits.data(), static_cast<int>(batch), stream.get());
 
-    std::vector<float> logits(static_cast<std::size_t>(config_.classes));
+    std::vector<float> logits(batch * static_cast<std::size_t>(config_.classes));
     device_logits.copy_to_host_async(logits.data(), logits.size(), stream.get());
     stream.synchronize();
     return logits;

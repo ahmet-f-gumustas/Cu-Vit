@@ -110,9 +110,22 @@ TILE_SWEEP = [
 ]
 
 LATENCY = [
-    ("PyTorch, cuBLAS + cuDNN", 1.691, "other"),
-    ("Cu-Vit 0.3.0", 1.887, "series"),
-    ("Cu-Vit 0.2.0", 2.363, "recessive"),
+    ("Cu-Vit, batch 32", 0.761, "series"),
+    ("Cu-Vit, batch 8", 0.928, "series"),
+    ("Cu-Vit, batch 1", 2.000, "series"),
+    ("PyTorch, batch 32", 0.569, "other"),
+    ("PyTorch, batch 1", 1.771, "other"),
+]
+
+# Throughput against batch size, measured on the same GPU.
+THROUGHPUT = [
+    ("64", 1307, "series"),
+    ("32", 1314, "series"),
+    ("16", 1253, "series"),
+    ("8", 1078, "series"),
+    ("4", 939, "series"),
+    ("2", 676, "series"),
+    ("1", 500, "series"),
 ]
 
 # GPU time per stage, from nsys on the shipped build.
@@ -133,12 +146,15 @@ CHARTS = [
     ("tile-sweep", "GEMM tile sweep",
      "Total GEMM time per forward pass, lower is better. Eight shapes, weighted "
      "by how often each runs.", TILE_SWEEP, lambda v: f"{v:,.0f} µs"),
-    ("latency", "Forward pass, batch size one",
-     "ViT-Tiny/16 at 224×224, FP32, RTX 4070 Laptop GPU. Median of seven runs "
-     "of 400 iterations.", LATENCY, lambda v: f"{v:.3f} ms"),
+    ("latency", "Time per image",
+     "ViT-Tiny/16 at 224×224, FP32, RTX 4070 Laptop GPU. Lower is better; "
+     "batching is what closes the gap.", LATENCY, lambda v: f"{v:.3f} ms"),
+    ("throughput", "Throughput by batch size",
+     "Images per second, Cu-Vit on an RTX 4070 Laptop GPU. The curve flattens "
+     "once the GPU is full.", THROUGHPUT, lambda v: f"{v:,.0f} img/s"),
     ("breakdown", "Where a forward pass goes",
-     "GPU time per stage, from nsys. The six GEMM rows are 93% of it, across 113 "
-     "kernel launches.", BREAKDOWN, lambda v: f"{v:,.1f} µs"),
+     "GPU time per stage of a batch-one pass, from nsys. The six GEMM rows are "
+     "93% of it, across 113 kernel launches.", BREAKDOWN, lambda v: f"{v:,.1f} µs"),
 ]
 
 

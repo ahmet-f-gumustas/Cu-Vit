@@ -39,9 +39,10 @@ std::vector<float> run_on_device(const std::vector<float>& a, const std::vector<
         device_bias.copy_from_host(bias->data(), bias->size());
     }
 
+    cuvit::GemmProblem problem = cuvit::gemm_problem(m, n, k, layout);
+    problem.alpha = alpha;
     cuvit::launch_gemm(device_a.data(), device_b.data(),
-                       bias != nullptr ? device_bias.data() : nullptr, device_c.data(), m, n, k,
-                       layout, alpha);
+                       bias != nullptr ? device_bias.data() : nullptr, device_c.data(), problem);
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> output(static_cast<std::size_t>(m) * n);
@@ -140,10 +141,15 @@ void test_batched_strides() {
     device_queries.copy_from_host(queries.data(), queries.size());
     device_keys.copy_from_host(keys.data(), keys.size());
 
-    cuvit::launch_gemm(
-        device_queries.data(), device_keys.data(), nullptr, device_output.data(), tokens, tokens,
-        head_dim, GemmLayout::kTransposed, 0.125F, heads, static_cast<std::int64_t>(per_head_input),
-        static_cast<std::int64_t>(per_head_input), static_cast<std::int64_t>(per_head_output));
+    cuvit::GemmProblem problem =
+        cuvit::gemm_problem(tokens, tokens, head_dim, GemmLayout::kTransposed);
+    problem.alpha = 0.125F;
+    problem.batch.count = heads;
+    problem.batch.stride_a = static_cast<std::int64_t>(per_head_input);
+    problem.batch.stride_b = static_cast<std::int64_t>(per_head_input);
+    problem.batch.stride_c = static_cast<std::int64_t>(per_head_output);
+    cuvit::launch_gemm(device_queries.data(), device_keys.data(), nullptr, device_output.data(),
+                       problem);
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> actual(per_head_output * heads);
@@ -184,9 +190,12 @@ void test_zero_stride_shares_an_operand() {
     device_a.copy_from_host(a.data(), a.size());
     device_b.copy_from_host(b.data(), b.size());
 
-    cuvit::launch_gemm(device_a.data(), device_b.data(), nullptr, device_c.data(), m, n, k,
-                       GemmLayout::kNoTranspose, 1.0F, batch, static_cast<std::int64_t>(m) * k, 0,
-                       static_cast<std::int64_t>(m) * n);
+    cuvit::GemmProblem problem = cuvit::gemm_problem(m, n, k, GemmLayout::kNoTranspose);
+    problem.batch.count = batch;
+    problem.batch.stride_a = static_cast<std::int64_t>(m) * k;
+    problem.batch.stride_b = 0;
+    problem.batch.stride_c = static_cast<std::int64_t>(m) * n;
+    cuvit::launch_gemm(device_a.data(), device_b.data(), nullptr, device_c.data(), problem);
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> actual(static_cast<std::size_t>(batch) * m * n);
@@ -239,9 +248,10 @@ void test_accumulate_epilogue_adds_into_the_destination() {
     device_bias.copy_from_host(bias.data(), bias.size());
     device_c.copy_from_host(existing.data(), existing.size());
 
-    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(), m, n,
-                       k, GemmLayout::kNoTranspose, 1.0F, 1, 0, 0, 0, 0, 0, 0,
-                       {/*accumulate=*/true});
+    cuvit::GemmProblem accumulating = cuvit::gemm_problem(m, n, k, GemmLayout::kNoTranspose);
+    accumulating.epilogue.accumulate = true;
+    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(),
+                       accumulating);
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> actual(count);
@@ -255,8 +265,8 @@ void test_accumulate_epilogue_adds_into_the_destination() {
     // Without the epilogue the same call must overwrite instead, or the flag
     // would be doing nothing and the test above would pass on stale data.
     device_c.copy_from_host(existing.data(), existing.size());
-    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(), m, n,
-                       k, GemmLayout::kNoTranspose);
+    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(),
+                       cuvit::gemm_problem(m, n, k, GemmLayout::kNoTranspose));
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
     device_c.copy_to_host(actual.data(), count);
     cuvit::testing::require_close_scaled(actual.data(), product.data(), scale.data(), count,
@@ -289,9 +299,10 @@ void test_gelu_epilogue_matches_the_standalone_kernel() {
     device_b.copy_from_host(b.data(), b.size());
     device_bias.copy_from_host(bias.data(), bias.size());
 
-    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(), m, n,
-                       k, GemmLayout::kNoTranspose, 1.0F, 1, 0, 0, 0, 0, 0, 0,
-                       {/*accumulate=*/false, /*gelu=*/true});
+    cuvit::GemmProblem activated = cuvit::gemm_problem(m, n, k, GemmLayout::kNoTranspose);
+    activated.epilogue.gelu = true;
+    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(),
+                       activated);
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> actual(count);
@@ -317,16 +328,16 @@ void test_degenerate_and_invalid_arguments() {
 
     // An empty problem is a no-op, not an error: the model issues one whenever a
     // dimension collapses.
-    cuvit::launch_gemm(buffer.data(), buffer.data(), nullptr, buffer.data(), 0, 4, 4,
-                       GemmLayout::kNoTranspose);
-    cuvit::launch_gemm(buffer.data(), buffer.data(), nullptr, buffer.data(), 4, 0, 4,
-                       GemmLayout::kNoTranspose);
+    cuvit::launch_gemm(buffer.data(), buffer.data(), nullptr, buffer.data(),
+                       cuvit::gemm_problem(0, 4, 4, GemmLayout::kNoTranspose));
+    cuvit::launch_gemm(buffer.data(), buffer.data(), nullptr, buffer.data(),
+                       cuvit::gemm_problem(4, 0, 4, GemmLayout::kNoTranspose));
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     bool caught = false;
     try {
-        cuvit::launch_gemm(nullptr, buffer.data(), nullptr, buffer.data(), 4, 4, 4,
-                           GemmLayout::kNoTranspose);
+        cuvit::launch_gemm(nullptr, buffer.data(), nullptr, buffer.data(),
+                           cuvit::gemm_problem(4, 4, 4, GemmLayout::kNoTranspose));
     } catch (const std::invalid_argument&) {
         caught = true;
     }
@@ -334,8 +345,8 @@ void test_degenerate_and_invalid_arguments() {
 
     caught = false;
     try {
-        cuvit::launch_gemm(buffer.data(), buffer.data(), nullptr, buffer.data(), -1, 4, 4,
-                           GemmLayout::kNoTranspose);
+        cuvit::launch_gemm(buffer.data(), buffer.data(), nullptr, buffer.data(),
+                           cuvit::gemm_problem(-1, 4, 4, GemmLayout::kNoTranspose));
     } catch (const std::invalid_argument&) {
         caught = true;
     }
@@ -355,8 +366,8 @@ void test_zero_k_produces_the_bias() {
     cuvit::DeviceBuffer<float> c(static_cast<std::size_t>(m) * n);
     device_bias.copy_from_host(bias.data(), bias.size());
 
-    cuvit::launch_gemm(a.data(), b.data(), device_bias.data(), c.data(), m, n, 0,
-                       GemmLayout::kNoTranspose);
+    cuvit::launch_gemm(a.data(), b.data(), device_bias.data(), c.data(),
+                       cuvit::gemm_problem(m, n, 0, GemmLayout::kNoTranspose));
     CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> actual(static_cast<std::size_t>(m) * n);

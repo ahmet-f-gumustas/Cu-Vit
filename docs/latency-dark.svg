@@ -1,16 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="168" viewBox="0 0 760 168" role="img" aria-label="Forward pass, batch size one. ViT-Tiny/16 at 224×224, FP32, RTX 4070 Laptop GPU. Median of seven runs of 400 iterations.">
-<rect width="760" height="168" fill="#1a1a19"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="228" viewBox="0 0 760 228" role="img" aria-label="Time per image. ViT-Tiny/16 at 224×224, FP32, RTX 4070 Laptop GPU. Lower is better; batching is what closes the gap.">
+<rect width="760" height="228" fill="#1a1a19"/>
 <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
-<text x="16" y="28" font-size="15" font-weight="600" fill="#ffffff">Forward pass, batch size one</text>
-<text x="16" y="48" font-size="11.5" fill="#c3c2b7">ViT-Tiny/16 at 224×224, FP32, RTX 4070 Laptop GPU. Median of seven runs of 400 iterations.</text>
-<line x1="210" y1="56" x2="210" y2="156" stroke="#383835" stroke-width="1"/>
-<text x="200" y="78" font-size="11.5" text-anchor="end" fill="#c3c2b7">PyTorch, cuBLAS + cuDNN</text>
-<path d="M210,64h320.89a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-320.89z" fill="#d95926"/>
-<text x="544.89" y="78" font-size="11.5" fill="#ffffff">1.691 ms</text>
-<text x="200" y="108" font-size="11.5" text-anchor="end" fill="#c3c2b7">Cu-Vit 0.3.0</text>
-<path d="M210,94h358.55a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-358.55z" fill="#3987e5"/>
-<text x="582.55" y="108" font-size="11.5" fill="#ffffff">1.887 ms</text>
-<text x="200" y="138" font-size="11.5" text-anchor="end" fill="#c3c2b7">Cu-Vit 0.2.0</text>
-<path d="M210,124h450.00a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-450.00z" fill="#55544f"/>
-<text x="674.00" y="138" font-size="11.5" fill="#ffffff">2.363 ms</text>
+<text x="16" y="28" font-size="15" font-weight="600" fill="#ffffff">Time per image</text>
+<text x="16" y="48" font-size="11.5" fill="#c3c2b7">ViT-Tiny/16 at 224×224, FP32, RTX 4070 Laptop GPU. Lower is better; batching is what closes the gap.</text>
+<line x1="210" y1="56" x2="210" y2="216" stroke="#383835" stroke-width="1"/>
+<text x="200" y="78" font-size="11.5" text-anchor="end" fill="#c3c2b7">Cu-Vit, batch 32</text>
+<path d="M210,64h168.75a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-168.75z" fill="#3987e5"/>
+<text x="392.75" y="78" font-size="11.5" fill="#ffffff">0.761 ms</text>
+<text x="200" y="108" font-size="11.5" text-anchor="end" fill="#c3c2b7">Cu-Vit, batch 8</text>
+<path d="M210,94h206.66a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-206.66z" fill="#3987e5"/>
+<text x="430.66" y="108" font-size="11.5" fill="#ffffff">0.928 ms</text>
+<text x="200" y="138" font-size="11.5" text-anchor="end" fill="#c3c2b7">Cu-Vit, batch 1</text>
+<path d="M210,124h450.00a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-450.00z" fill="#3987e5"/>
+<text x="674.00" y="138" font-size="11.5" fill="#ffffff">2.000 ms</text>
+<text x="200" y="168" font-size="11.5" text-anchor="end" fill="#c3c2b7">PyTorch, batch 32</text>
+<path d="M210,154h125.16a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-125.16z" fill="#d95926"/>
+<text x="349.16" y="168" font-size="11.5" fill="#ffffff">0.569 ms</text>
+<text x="200" y="198" font-size="11.5" text-anchor="end" fill="#c3c2b7">PyTorch, batch 1</text>
+<path d="M210,184h398.02a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-398.02z" fill="#d95926"/>
+<text x="622.02" y="198" font-size="11.5" fill="#ffffff">1.771 ms</text>
 </g></svg>

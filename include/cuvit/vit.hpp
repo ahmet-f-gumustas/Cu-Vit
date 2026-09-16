@@ -52,25 +52,36 @@ struct BlockWeights {
 
 /// A ViT ready to run: weights uploaded, scratch space reserved.
 ///
-/// Everything is allocated once at construction. A forward pass then performs no
-/// allocation at all, so its cost is the arithmetic and nothing else.
+/// Everything is allocated once at construction, sized for @p max_batch images.
+/// A forward pass then performs no allocation at all, so its cost is the
+/// arithmetic and nothing else.
+///
+/// Batching is what turns this model from launch-bound into compute-bound. At
+/// one image the largest GEMM is [197, 768], too small to occupy the GPU; the
+/// token rows of a batch concatenate, so eight images give the same kernels
+/// eight times the rows at the same launch count.
 class VisionTransformer final {
   public:
     /// Uploads @p file into device memory, checking every tensor's shape against
-    /// @p config. Names follow timm's state dict.
-    VisionTransformer(const VitConfig& config, const WeightFile& file);
+    /// @p config, and reserves activation space for @p max_batch images. Names
+    /// follow timm's state dict.
+    VisionTransformer(const VitConfig& config, const WeightFile& file, int max_batch = 1);
 
-    /// Runs one image, given as [channels, height, width] in device memory, and
-    /// writes @p config.classes logits to @p logits, also in device memory.
+    /// Runs @p batch images, given as @p batch planar [channels, height, width]
+    /// blocks back to back in device memory, and writes
+    /// @p batch x @p config.classes logits to @p logits, also in device memory.
     ///
     /// Work is queued on @p stream; the caller synchronizes before reading.
-    void forward(const float* image, float* logits, cudaStream_t stream = nullptr);
+    void forward(const float* images, float* logits, int batch, cudaStream_t stream = nullptr);
 
     /// Convenience wrapper taking and returning host memory, synchronizing
-    /// internally.
-    [[nodiscard]] std::vector<float> forward(const std::vector<float>& image);
+    /// internally. The batch size is taken from the size of @p images.
+    [[nodiscard]] std::vector<float> forward(const std::vector<float>& images);
 
     [[nodiscard]] const VitConfig& config() const noexcept { return config_; }
+    [[nodiscard]] int max_batch() const noexcept { return max_batch_; }
+    /// Elements one image occupies on the input side.
+    [[nodiscard]] std::size_t image_elements() const noexcept;
 
     /// Bytes held for weights and for activations.
     [[nodiscard]] std::size_t weight_bytes() const noexcept { return weights_.used(); }
@@ -80,9 +91,10 @@ class VisionTransformer final {
     [[nodiscard]] static std::vector<std::string> expected_tensor_names(const VitConfig& config);
 
   private:
-    void run_block(const BlockWeights& block, float* tokens, cudaStream_t stream);
+    void run_block(const BlockWeights& block, float* tokens, int batch, cudaStream_t stream);
 
     VitConfig config_;
+    int max_batch_ = 1;
 
     DeviceArena weights_;
     DeviceArena activations_;
