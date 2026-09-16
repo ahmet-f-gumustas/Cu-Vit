@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="378" viewBox="0 0 760 378" role="img" aria-label="Where a forward pass goes. GPU time per stage, from nsys. The six GEMM rows are 93% of it, across 113 kernel launches.">
+<rect width="760" height="378" fill="#1a1a19"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<text x="16" y="28" font-size="15" font-weight="600" fill="#ffffff">Where a forward pass goes</text>
+<text x="16" y="48" font-size="11.5" fill="#c3c2b7">GPU time per stage, from nsys. The six GEMM rows are 93% of it, across 113 kernel launches.</text>
+<line x1="210" y1="56" x2="210" y2="366" stroke="#383835" stroke-width="1"/>
+<text x="200" y="78" font-size="11.5" text-anchor="end" fill="#c3c2b7">proj + fc2 + patch embed</text>
+<path d="M210,64h450.00a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-450.00z" fill="#3987e5"/>
+<text x="674.00" y="78" font-size="11.5" fill="#ffffff">1,084.7 µs</text>
+<text x="200" y="108" font-size="11.5" text-anchor="end" fill="#c3c2b7">mlp fc1</text>
+<path d="M210,94h174.34a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-174.34z" fill="#3987e5"/>
+<text x="398.34" y="108" font-size="11.5" fill="#ffffff">426.1 µs</text>
+<text x="200" y="138" font-size="11.5" text-anchor="end" fill="#c3c2b7">qkv projection</text>
+<path d="M210,124h122.11a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-122.11z" fill="#3987e5"/>
+<text x="346.11" y="138" font-size="11.5" fill="#ffffff">301.3 µs</text>
+<text x="200" y="168" font-size="11.5" text-anchor="end" fill="#c3c2b7">attention × V</text>
+<path d="M210,154h71.92a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-71.92z" fill="#3987e5"/>
+<text x="295.92" y="168" font-size="11.5" fill="#ffffff">181.4 µs</text>
+<text x="200" y="198" font-size="11.5" text-anchor="end" fill="#c3c2b7">Q × Kᵀ</text>
+<path d="M210,184h61.80a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-61.80z" fill="#3987e5"/>
+<text x="285.80" y="198" font-size="11.5" fill="#ffffff">157.2 µs</text>
+<text x="200" y="228" font-size="11.5" text-anchor="end" fill="#c3c2b7">softmax</text>
+<path d="M210,214h26.26a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-26.26z" fill="#55544f"/>
+<text x="250.26" y="228" font-size="11.5" fill="#ffffff">72.3 µs</text>
+<text x="200" y="258" font-size="11.5" text-anchor="end" fill="#c3c2b7">layer norm</text>
+<path d="M210,244h25.97a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-25.97z" fill="#55544f"/>
+<text x="249.97" y="258" font-size="11.5" fill="#ffffff">71.6 µs</text>
+<text x="200" y="288" font-size="11.5" text-anchor="end" fill="#c3c2b7">classifier head</text>
+<path d="M210,274h2.36a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-2.36z" fill="#3987e5"/>
+<text x="226.36" y="288" font-size="11.5" fill="#ffffff">15.2 µs</text>
+<text x="200" y="318" font-size="11.5" text-anchor="end" fill="#c3c2b7">patch gather</text>
+<path d="M210,304h0.00a2.050889646906979,2.050889646906979 0 0 1 2.050889646906979,2.050889646906979v15.898220706186041a2.050889646906979,2.050889646906979 0 0 1 -2.050889646906979,2.050889646906979h-0.00z" fill="#55544f"/>
+<text x="222.05" y="318" font-size="11.5" fill="#ffffff">4.9 µs</text>
+<text x="200" y="348" font-size="11.5" text-anchor="end" fill="#c3c2b7">positional add</text>
+<path d="M210,334h0.00a0.7533880335576657,0.7533880335576657 0 0 1 0.7533880335576657,0.7533880335576657v18.493223932884668a0.7533880335576657,0.7533880335576657 0 0 1 -0.7533880335576657,0.7533880335576657h-0.00z" fill="#55544f"/>
+<text x="220.75" y="348" font-size="11.5" fill="#ffffff">1.8 µs</text>
+</g></svg>
