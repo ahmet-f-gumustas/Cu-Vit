@@ -156,9 +156,10 @@ __global__ void add_kernel(float* __restrict__ accumulator, const float* __restr
 /// One thread per output element. The read is scattered and the write is
 /// coalesced, which is the right way round: the gather runs once per inference
 /// while the matrix it produces is read repeatedly by the GEMM.
-__global__ void extract_patches_kernel(const float* __restrict__ image, float* __restrict__ patches,
-                                       int channels, int height, int width, int patch,
-                                       int patches_across, std::int64_t total) {
+__global__ void extract_patches_kernel(const float* __restrict__ images,
+                                       float* __restrict__ patches, int channels, int height,
+                                       int width, int patch, int patches_across,
+                                       int patches_per_image, std::int64_t total) {
     const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= total) {
         return;
@@ -168,7 +169,10 @@ __global__ void extract_patches_kernel(const float* __restrict__ image, float* _
     const int row_length = channels * patch_area;
 
     const int element = static_cast<int>(index % row_length);
-    const int patch_index = static_cast<int>(index / row_length);
+    const int global_patch = static_cast<int>(index / row_length);
+    // Patch rows run image-major, so the image index falls out of the row.
+    const int image = global_patch / patches_per_image;
+    const int patch_index = global_patch % patches_per_image;
 
     const int channel = element / patch_area;
     const int within = element % patch_area;
@@ -181,8 +185,30 @@ __global__ void extract_patches_kernel(const float* __restrict__ image, float* _
     const int source_row = patch_row * patch + local_row;
     const int source_column = patch_column * patch + local_column;
 
+    const std::int64_t plane = static_cast<std::int64_t>(channels) * height * width;
     patches[index] =
-        image[(static_cast<std::int64_t>(channel) * height + source_row) * width + source_column];
+        images[static_cast<std::int64_t>(image) * plane +
+               (static_cast<std::int64_t>(channel) * height + source_row) * width + source_column];
+}
+
+__global__ void add_broadcast_kernel(float* __restrict__ accumulator,
+                                     const float* __restrict__ addend, std::int64_t count,
+                                     std::int64_t total) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < total) {
+        accumulator[index] += addend[index % count];
+    }
+}
+
+__global__ void broadcast_kernel(float* __restrict__ destination, const float* __restrict__ source,
+                                 std::int64_t count, std::int64_t destination_stride,
+                                 std::int64_t total) {
+    const std::int64_t index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < total) {
+        const std::int64_t slot = index / count;
+        const std::int64_t offset = index % count;
+        destination[slot * destination_stride + offset] = source[offset];
+    }
 }
 
 unsigned int elementwise_blocks(std::int64_t count) {
@@ -244,26 +270,30 @@ void launch_gelu(const float* input, float* output, std::int64_t count, cudaStre
     CUVIT_CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_extract_patches(const float* image, float* patches, int channels, int height, int width,
-                            int patch, cudaStream_t stream) {
-    if (channels <= 0 || height <= 0 || width <= 0 || patch <= 0) {
+void launch_extract_patches(const float* images, float* patches, int batch, int channels,
+                            int height, int width, int patch, cudaStream_t stream) {
+    if (batch == 0) {
+        return;
+    }
+    if (batch < 0 || channels <= 0 || height <= 0 || width <= 0 || patch <= 0) {
         throw std::invalid_argument("Patch extraction dimensions must be positive");
     }
     if (height % patch != 0 || width % patch != 0) {
         throw std::invalid_argument("Patch extraction needs the image to divide into whole "
                                     "patches");
     }
-    if (image == nullptr || patches == nullptr) {
+    if (images == nullptr || patches == nullptr) {
         throw std::invalid_argument("Patch extraction operands cannot be null");
     }
 
     const int patches_down = height / patch;
     const int patches_across = width / patch;
+    const int patches_per_image = patches_down * patches_across;
     const std::int64_t total =
-        static_cast<std::int64_t>(patches_down) * patches_across * channels * patch * patch;
+        static_cast<std::int64_t>(batch) * patches_per_image * channels * patch * patch;
 
     extract_patches_kernel<<<elementwise_blocks(total), kElementwiseThreads, 0, stream>>>(
-        image, patches, channels, height, width, patch, patches_across, total);
+        images, patches, channels, height, width, patch, patches_across, patches_per_image, total);
     CUVIT_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -280,6 +310,42 @@ void launch_add(float* accumulator, const float* addend, std::int64_t count, cud
 
     add_kernel<<<elementwise_blocks(count), kElementwiseThreads, 0, stream>>>(accumulator, addend,
                                                                               count);
+    CUVIT_CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_add_broadcast(float* accumulator, const float* addend, std::int64_t count, int batch,
+                          cudaStream_t stream) {
+    if (count == 0 || batch == 0) {
+        return;
+    }
+    if (count < 0 || batch < 0) {
+        throw std::invalid_argument("Broadcast add extents cannot be negative");
+    }
+    if (accumulator == nullptr || addend == nullptr) {
+        throw std::invalid_argument("Broadcast add operands cannot be null");
+    }
+
+    const std::int64_t total = count * batch;
+    add_broadcast_kernel<<<elementwise_blocks(total), kElementwiseThreads, 0, stream>>>(
+        accumulator, addend, count, total);
+    CUVIT_CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_broadcast(float* destination, const float* source, std::int64_t count,
+                      std::int64_t destination_stride, int batch, cudaStream_t stream) {
+    if (count == 0 || batch == 0) {
+        return;
+    }
+    if (count < 0 || batch < 0 || destination_stride < count) {
+        throw std::invalid_argument("Broadcast extents are inconsistent");
+    }
+    if (destination == nullptr || source == nullptr) {
+        throw std::invalid_argument("Broadcast operands cannot be null");
+    }
+
+    const std::int64_t total = count * batch;
+    broadcast_kernel<<<elementwise_blocks(total), kElementwiseThreads, 0, stream>>>(
+        destination, source, count, destination_stride, total);
     CUVIT_CUDA_CHECK(cudaGetLastError());
 }
 

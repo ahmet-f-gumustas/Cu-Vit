@@ -196,6 +196,131 @@ void test_allocation_is_bounded_and_reused() {
             "weight memory did not grow with depth");
 }
 
+// The property batching has to have: putting images through together must give
+// each of them exactly what it would have got alone. Anything that leaks across
+// the batch -- a stride that reaches into the neighbouring image, a reduction
+// that spans two of them -- shows up here and almost nowhere else.
+void test_batch_matches_one_at_a_time() {
+    const VitConfig config = small_config();
+    const ScopedFile file("cuvit_test_batch_vit.cvw");
+    write_random_weights(config, file.path(), 606);
+    const WeightFile weights = WeightFile::load(file.path());
+
+    constexpr int batch = 5;
+    VisionTransformer single(config, weights, 1);
+    VisionTransformer batched(config, weights, batch);
+
+    const std::size_t per_image = single.image_elements();
+    std::vector<float> images;
+    std::vector<std::vector<float>> alone;
+    for (int index = 0; index < batch; ++index) {
+        // Distinct inputs: identical ones would pass even if the batch index
+        // were ignored entirely.
+        const std::vector<float> image =
+            random_image(config, static_cast<std::uint64_t>(100 + index));
+        images.insert(images.end(), image.begin(), image.end());
+        alone.push_back(single.forward(image));
+    }
+    require(images.size() == per_image * batch, "the batch was assembled wrong");
+
+    const std::vector<float> together = batched.forward(images);
+    require(together.size() == static_cast<std::size_t>(batch) * config.classes,
+            "the batch produced the wrong number of logits");
+
+    for (int index = 0; index < batch; ++index) {
+        // Bitwise: the same kernels run over the same values in the same order,
+        // so a batch must not perturb the arithmetic at all.
+        cuvit::testing::require_exact(together.data() +
+                                          static_cast<std::size_t>(index) * config.classes,
+                                      alone[static_cast<std::size_t>(index)].data(), config.classes,
+                                      "an image in a batch differs from the same image run alone");
+    }
+}
+
+// A batch smaller than the one the model was built for must still work, and
+// must not read the stale contents its scratch buffers still hold.
+void test_partial_batch_is_clean() {
+    const VitConfig config = small_config();
+    const ScopedFile file("cuvit_test_partial_vit.cvw");
+    write_random_weights(config, file.path(), 707);
+    const WeightFile weights = WeightFile::load(file.path());
+
+    VisionTransformer model(config, weights, 4);
+    const std::vector<float> first = random_image(config, 21);
+    const std::vector<float> second = random_image(config, 22);
+
+    std::vector<float> full;
+    for (const std::vector<float>* image : {&first, &second, &first, &second}) {
+        full.insert(full.end(), image->begin(), image->end());
+    }
+    const std::vector<float> four = model.forward(full);
+
+    std::vector<float> pair(full.begin(),
+                            full.begin() + static_cast<std::ptrdiff_t>(first.size() * 2));
+    const std::vector<float> two = model.forward(pair);
+
+    require(two.size() == static_cast<std::size_t>(2) * config.classes,
+            "a partial batch produced the wrong number of logits");
+    cuvit::testing::require_exact(two.data(), four.data(), 2 * config.classes,
+                                  "a partial batch disagrees with a full one");
+}
+
+void test_batch_limits_are_enforced() {
+    const VitConfig config = small_config();
+    const ScopedFile file("cuvit_test_limit_vit.cvw");
+    write_random_weights(config, file.path(), 808);
+    const WeightFile weights = WeightFile::load(file.path());
+
+    VisionTransformer model(config, weights, 2);
+    const std::size_t per_image = model.image_elements();
+
+    bool caught = false;
+    try {
+        static_cast<void>(model.forward(std::vector<float>(per_image * 3, 0.0F)));
+    } catch (const std::invalid_argument&) {
+        caught = true;
+    }
+    require(caught, "a batch larger than the model was built for was accepted");
+
+    caught = false;
+    try {
+        // Not a whole number of images.
+        static_cast<void>(model.forward(std::vector<float>(per_image + 1, 0.0F)));
+    } catch (const std::invalid_argument&) {
+        caught = true;
+    }
+    require(caught, "an input that is not a whole number of images was accepted");
+
+    caught = false;
+    try {
+        VisionTransformer zero(config, weights, 0);
+        static_cast<void>(zero.max_batch());
+    } catch (const std::invalid_argument&) {
+        caught = true;
+    }
+    require(caught, "a maximum batch of zero was accepted");
+}
+
+// Activation scratch scales with the batch and nothing else; depth must still
+// cost nothing.
+void test_activation_memory_scales_with_the_batch() {
+    const VitConfig config = small_config();
+    const ScopedFile file("cuvit_test_scale_vit.cvw");
+    write_random_weights(config, file.path(), 909);
+    const WeightFile weights = WeightFile::load(file.path());
+
+    VisionTransformer one(config, weights, 1);
+    VisionTransformer eight(config, weights, 8);
+
+    require(eight.weight_bytes() == one.weight_bytes(),
+            "the batch changed how much weight memory is held");
+    require(eight.activation_bytes() > one.activation_bytes(),
+            "activation memory did not grow with the batch");
+    // Alignment padding keeps this from being exactly eight times.
+    require(eight.activation_bytes() <= one.activation_bytes() * 8,
+            "activation memory grew faster than the batch");
+}
+
 void test_configuration_is_validated() {
     VitConfig config = small_config();
     config.embed_dim = 25; // not divisible by 4 heads
@@ -262,6 +387,10 @@ CUVIT_TEST_MAIN("vit_test", {
     test_forward_is_deterministic();
     test_different_inputs_produce_different_logits();
     test_allocation_is_bounded_and_reused();
+    test_batch_matches_one_at_a_time();
+    test_partial_batch_is_clean();
+    test_batch_limits_are_enforced();
+    test_activation_memory_scales_with_the_batch();
     test_configuration_is_validated();
     test_missing_and_misshaped_weights_are_rejected();
     test_expected_names_cover_the_file();

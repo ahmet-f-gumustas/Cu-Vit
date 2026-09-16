@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="378" viewBox="0 0 760 378" role="img" aria-label="Where a forward pass goes. GPU time per stage, from nsys. The six GEMM rows are 93% of it, across 113 kernel launches.">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="378" viewBox="0 0 760 378" role="img" aria-label="Where a forward pass goes. GPU time per stage of a batch-one pass, from nsys. The six GEMM rows are 93% of it, across 113 kernel launches.">
 <rect width="760" height="378" fill="#1a1a19"/>
 <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
 <text x="16" y="28" font-size="15" font-weight="600" fill="#ffffff">Where a forward pass goes</text>
-<text x="16" y="48" font-size="11.5" fill="#c3c2b7">GPU time per stage, from nsys. The six GEMM rows are 93% of it, across 113 kernel launches.</text>
+<text x="16" y="48" font-size="11.5" fill="#c3c2b7">GPU time per stage of a batch-one pass, from nsys. The six GEMM rows are 93% of it, across 113 kernel launches.</text>
 <line x1="210" y1="56" x2="210" y2="366" stroke="#383835" stroke-width="1"/>
 <text x="200" y="78" font-size="11.5" text-anchor="end" fill="#c3c2b7">proj + fc2 + patch embed</text>
 <path d="M210,64h450.00a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-450.00z" fill="#3987e5"/>

@@ -35,27 +35,68 @@ struct GemmEpilogue {
     bool gelu = false;
 };
 
-/// Batched general matrix multiply with an optional bias and scale.
+/// Which batch element a GEMM instance works on.
 ///
-///   C[b][m][n] = alpha * sum_k A[b][m][k] * B_layout[b][k][n] + bias[n]
+/// The index is optionally split into an outer and an inner part, because
+/// attention needs two nested dimensions at once: the projection is
+/// [images, tokens, 3 * embed], so one head of one image starts at
+/// `image * tokens * 3 * embed + head * head_dim`, and no single linear stride
+/// reaches it. Leave @p inner at zero and the index is flat, advancing by the
+/// plain strides.
+struct GemmBatch {
+    /// Number of independent problems.
+    int count = 1;
+    /// Element distance between consecutive entries.
+    std::int64_t stride_a = 0;
+    std::int64_t stride_b = 0;
+    std::int64_t stride_c = 0;
+    /// When positive, entry i is (i / inner, i % inner) and the first part
+    /// advances by the outer strides instead.
+    int inner = 0;
+    std::int64_t outer_stride_a = 0;
+    std::int64_t outer_stride_b = 0;
+    std::int64_t outer_stride_c = 0;
+};
+
+/// A batched general matrix multiply with an optional bias, scale and epilogue.
 ///
-/// Batch elements are addressed by element strides, so a batch can be a slice of
-/// a larger tensor: attention runs one GEMM per head over a packed QKV buffer
-/// without gathering the heads together first. A batch stride of zero shares one
-/// operand across the batch, which is how a single weight matrix is applied to
-/// every head.
+///   C[i][m][n] = epilogue(alpha * sum_k A[i][m][k] * B_layout[i][k][n] + bias[n])
 ///
 /// @p bias may be null. It is indexed by the output column, matching how a
 /// linear layer's bias broadcasts across rows.
+///
 /// @p lda, @p ldb and @p ldc give the distance between consecutive rows of each
 /// operand, which lets a GEMM read a column slice of a wider matrix in place.
 /// Attention relies on this: Q, K and V are interleaved inside one
 /// [tokens, 3 * embed] projection, and each head is a further slice of that.
-/// Passing zero selects the packed distance for the operand's shape and layout.
-void launch_gemm(const float* a, const float* b, const float* bias, float* c, int m, int n, int k,
-                 GemmLayout layout, float alpha = 1.0F, int batch = 1, std::int64_t stride_a = 0,
-                 std::int64_t stride_b = 0, std::int64_t stride_c = 0, int lda = 0, int ldb = 0,
-                 int ldc = 0, GemmEpilogue epilogue = {}, cudaStream_t stream = nullptr);
+/// Leaving one at zero selects the packed distance for the operand's shape and
+/// layout.
+struct GemmProblem {
+    int m = 0;
+    int n = 0;
+    int k = 0;
+    GemmLayout layout = GemmLayout::kNoTranspose;
+    float alpha = 1.0F;
+    int lda = 0;
+    int ldb = 0;
+    int ldc = 0;
+    GemmBatch batch;
+    GemmEpilogue epilogue;
+};
+
+/// Builds the common case: one un-batched problem, packed operands, no
+/// epilogue. Set the remaining fields on the result for anything else.
+[[nodiscard]] inline GemmProblem gemm_problem(int m, int n, int k, GemmLayout layout) {
+    GemmProblem problem;
+    problem.m = m;
+    problem.n = n;
+    problem.k = k;
+    problem.layout = layout;
+    return problem;
+}
+
+void launch_gemm(const float* a, const float* b, const float* bias, float* c,
+                 const GemmProblem& problem, cudaStream_t stream = nullptr);
 
 /// Layer normalization over the last axis, with a per-element affine transform.
 ///
@@ -91,11 +132,25 @@ void launch_softmax(const float* input, float* output, int rows, int columns,
 ///
 /// Within a row the elements are ordered channel-major, matching how a Conv2d
 /// weight of shape [out, in, kh, kw] is laid out.
-void launch_extract_patches(const float* image, float* patches, int channels, int height, int width,
-                            int patch, cudaStream_t stream = nullptr);
+/// @p images holds @p batch planar images back to back, and @p patches receives
+/// their patch rows in the same order.
+void launch_extract_patches(const float* images, float* patches, int batch, int channels,
+                            int height, int width, int patch, cudaStream_t stream = nullptr);
 
 /// Adds @p addend into @p accumulator elementwise, for a residual connection.
 void launch_add(float* accumulator, const float* addend, std::int64_t count,
                 cudaStream_t stream = nullptr);
+
+/// Adds one @p addend of @p count elements into each of @p batch consecutive
+/// blocks of @p accumulator. The positional embedding is shared by every image
+/// in a batch, so it is stored once and broadcast here rather than replicated.
+void launch_add_broadcast(float* accumulator, const float* addend, std::int64_t count, int batch,
+                          cudaStream_t stream = nullptr);
+
+/// Writes @p source of @p count elements into @p batch slots of @p destination,
+/// each @p destination_stride elements apart. Used to seed every image's class
+/// token from the single stored one.
+void launch_broadcast(float* destination, const float* source, std::int64_t count,
+                      std::int64_t destination_stride, int batch, cudaStream_t stream = nullptr);
 
 } // namespace cuvit

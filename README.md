@@ -7,13 +7,13 @@ Transformer architecture ([Dosovitskiy et al., 2020](https://arxiv.org/abs/2010.
 The project maps transformer operations directly to CUDA kernels instead of hiding
 them behind a high-level deep learning framework.
 
-> **Status:** End-to-end inference works. ViT-Tiny/16 runs on hand-written CUDA
-> kernels and reproduces PyTorch's logits to within 1.6e-5. Mixed precision,
-> tensor cores, and batching are not done yet.
+> **Status:** End-to-end inference works, batched. ViT-Tiny/16 runs on
+> hand-written CUDA kernels and reproduces PyTorch's logits to within 1.6e-5.
+> Mixed precision and tensor cores are not done yet.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/latency-dark.svg">
-  <img alt="Forward pass at batch size one: PyTorch with cuBLAS and cuDNN 1.691 ms, Cu-Vit 0.3.0 1.887 ms, Cu-Vit 0.2.0 2.363 ms." src="docs/latency-light.svg">
+  <img alt="Time per image: Cu-Vit at batch 32 0.761 ms, at batch 8 0.928 ms, at batch 1 2.000 ms; PyTorch at batch 32 0.569 ms, at batch 1 1.771 ms." src="docs/latency-light.svg">
 </picture>
 
 ## Current capabilities
@@ -205,13 +205,13 @@ python3 tools/export_vit_weights.py --model vit_tiny_patch16_224 --output vit_ti
 ./build/cu-vit --weights vit_tiny.cvw --image photo.ppm --top 5
 
 # From an already preprocessed float32 tensor, 3x224x224 planar:
-./build/cu-vit --weights vit_tiny.cvw --raw input.bin --benchmark 200
+./build/cu-vit --weights vit_tiny.cvw --raw input.bin --batch 32 --benchmark 200
 ```
 
 ```text
 Cu-Vit
 GPU: NVIDIA GeForce RTX 4070 Laptop GPU (compute 8.9)
-Weights: 152 tensors, 21.81 MiB; activations 2.46 MiB
+Weights: 152 tensors, 21.81 MiB; activations 78.76 MiB
 
 Top 5:
    646     7.2046    9.85%
@@ -220,7 +220,7 @@ Top 5:
    815     6.5097    4.92%
    701     6.2187    3.68%
 
-Forward pass: 1.887 ms  (530.0 images/s over 400 iterations)
+Batch 32: 24.352 ms per pass, 0.761 ms per image (1314.0 images/s over 200 iterations)
 ```
 
 ## Accuracy and speed
@@ -228,22 +228,29 @@ Forward pass: 1.887 ms  (530.0 images/s over 400 iterations)
 Against `timm`'s `vit_tiny_patch16_224` on the same input, batch size one,
 FP32 throughout:
 
-| | Cu-Vit | PyTorch (cuBLAS/cuDNN) |
-| --- | --- | --- |
-| Largest logit difference | 1.6e-05 | reference |
-| Forward pass | 1.887 ms | 1.691 ms |
-| Throughput | 530 images/s | 591 images/s |
+| Batch | Cu-Vit | PyTorch (cuBLAS/cuDNN) | Ratio |
+| --- | --- | --- | --- |
+| 1 | 2.000 ms | 1.771 ms | 1.13x |
+| 8 | 0.928 ms | 0.561 ms | 1.65x |
+| 32 | 0.761 ms | 0.569 ms | 1.34x |
 
-The top-5 predictions are identical. Median of seven runs of 400 iterations each,
-on an RTX 4070 Laptop GPU. The chart is at the top of this file.
+Time per image, median of five runs on an RTX 4070 Laptop GPU. The largest logit
+difference from PyTorch is 1.6e-05 at batch one and 1.5e-05 at batch eight, and
+every top-1 prediction matches.
 
-Cu-Vit is 1.12x slower than the vendor libraries. Both are far from the card's
-15.6 TFLOPS: at batch size one this model is 2.51 GFLOP of work spread over 113
-kernel launches, so Cu-Vit reaches 1.33 TFLOPS and PyTorch 1.48. The problem is
-too small to fill the GPU, which is what the remaining optimization work has to
-address -- batching, or fewer and larger kernels.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/throughput-dark.svg">
+  <img alt="Throughput by batch size: 500 images per second at batch 1, 676 at 2, 939 at 4, 1078 at 8, 1253 at 16, 1314 at 32, 1307 at 64." src="docs/throughput-light.svg">
+</picture>
 
-## Why the tile is 64x32
+Batching is what turns this model from launch-bound into compute-bound. A single
+image is 2.51 GFLOP spread over 113 kernel launches -- too little work per launch
+to occupy 36 SMs. The token rows of a batch concatenate, so eight images give the
+same kernels eight times the rows at the same launch count, and throughput rises
+from 500 to 1314 images per second. It flattens past batch 32, where the GPU is
+full and the arithmetic is the limit: 3.30 TFLOPS of the card's 15.6.
+
+## Why the tile depends on the batch
 
 The first working version used a 64x64 tile and took 2.363 ms. Profiling said
 the GEMM was 91.7% of GPU time, and `ncu` said why: the most frequent shape,
@@ -252,8 +259,8 @@ multiprocessor**, with the SMs at 8% throughput and DRAM at 5%. Neither compute
 nor bandwidth bound -- simply not enough blocks to occupy the machine.
 
 Halving the tile width doubles the block count at the same occupancy per block.
-Measured across the eight shapes this model issues, summed with their per-pass
-multiplicities:
+Measured across the eight shapes a batch-one pass issues, summed with their
+per-pass multiplicities:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/tile-sweep-dark.svg">
@@ -261,10 +268,24 @@ multiplicities:
 </picture>
 
 Picking the best tile per shape instead of one for all buys a further 6%, which
-is inside the run-to-run spread, so the kernel keeps a single tile.
+is inside the run-to-run spread, so the kernel does not do that.
 
-Wider tiles win once the matrices are large enough to fill the GPU anyway. This
-choice belongs with batch-size-one inference, not with the kernel.
+But the batch changes the answer completely. A batch stacks the token rows, and
+the same shapes become tall enough that a wider tile's register reuse wins
+instead:
+
+| Rows (M) | 64x32 | 128x64 |
+| --- | --- | --- |
+| 197 (batch 1) | **1660** | 2554 |
+| 394 (batch 2) | **2618** | 2799 |
+| 788 (batch 4) | 3494 | **2892** |
+| 1576 (batch 8) | 5996 | **4746** |
+| 6304 (batch 32) | 22647 | **14305** |
+
+So the kernel is templated on the tile and the launcher picks by row count, with
+the threshold at 512 where the crossover sits. Both shapes produce identical
+results; the dispatch is a performance decision the caller never sees. It is
+worth 1.32x at batch 32.
 
 The residual addition and the MLP's GELU are folded into the GEMM's store, which
 removes 36 launches per pass and one scratch buffer. That is worth 1%, not the
@@ -447,8 +468,9 @@ Cu-Vit/
 - [x] Full encoder stack and classification head.
 - [x] Image preprocessing and end-to-end inference.
 - [x] Profile-driven GEMM tiling and epilogue fusion.
+- [x] Batched inference with a size-dependent GEMM tile.
 - [ ] FP16/mixed precision and tensor cores.
-- [ ] Batched inference and a cuBLAS comparison harness.
+- [ ] A cuBLAS comparison harness.
 
 ## Figures
 

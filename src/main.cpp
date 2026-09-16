@@ -26,6 +26,7 @@ struct Options {
     std::string raw;
     int top = 5;
     int benchmark = 0;
+    int batch = 1;
 };
 
 void print_usage() {
@@ -36,7 +37,8 @@ void print_usage() {
               << "                ffmpeg -i photo.jpg -pix_fmt rgb24 photo.ppm\n"
               << "  --raw       Preprocessed float32 tensor, 3x224x224, planar\n"
               << "  --top       Number of classes to report (default 5)\n"
-              << "  --benchmark Time this many forward passes after a warm-up\n";
+              << "  --benchmark Time this many forward passes after a warm-up\n"
+              << "  --batch     Replicate the input to this batch size when benchmarking\n";
 }
 
 std::string require_value(int argc, char** argv, int& index, const char* flag) {
@@ -60,6 +62,8 @@ Options parse(int argc, char** argv) {
             options.top = std::stoi(require_value(argc, argv, index, "--top"));
         } else if (argument == "--benchmark") {
             options.benchmark = std::stoi(require_value(argc, argv, index, "--benchmark"));
+        } else if (argument == "--batch") {
+            options.batch = std::stoi(require_value(argc, argv, index, "--batch"));
         } else if (argument == "--help" || argument == "-h") {
             print_usage();
             std::exit(0);
@@ -109,31 +113,41 @@ void report_top(const std::vector<float>& logits, int count) {
     }
 }
 
-void run_benchmark(cuvit::VisionTransformer& model, const std::vector<float>& image,
-                   int iterations) {
+void run_benchmark(cuvit::VisionTransformer& model, const std::vector<float>& image, int iterations,
+                   int batch) {
     const cuvit::VitConfig& config = model.config();
-    cuvit::DeviceBuffer<float> device_image(image.size());
-    cuvit::DeviceBuffer<float> device_logits(static_cast<std::size_t>(config.classes));
+
+    // The same image repeated: this measures how throughput scales with the
+    // batch, which is a property of the kernels rather than of the data.
+    std::vector<float> images(image.size() * static_cast<std::size_t>(batch));
+    for (int index = 0; index < batch; ++index) {
+        std::copy(image.begin(), image.end(),
+                  images.begin() + static_cast<std::ptrdiff_t>(index) * image.size());
+    }
+
+    cuvit::DeviceBuffer<float> device_images(images.size());
+    cuvit::DeviceBuffer<float> device_logits(static_cast<std::size_t>(batch) * config.classes);
     cuvit::Stream stream;
-    device_image.copy_from_host(image.data(), image.size());
+    device_images.copy_from_host(images.data(), images.size());
 
     for (int index = 0; index < 10; ++index) {
-        model.forward(device_image.data(), device_logits.data(), stream.get());
+        model.forward(device_images.data(), device_logits.data(), batch, stream.get());
     }
     stream.synchronize();
 
     const auto start = std::chrono::steady_clock::now();
     for (int index = 0; index < iterations; ++index) {
-        model.forward(device_image.data(), device_logits.data(), stream.get());
+        model.forward(device_images.data(), device_logits.data(), batch, stream.get());
     }
     stream.synchronize();
     const auto finish = std::chrono::steady_clock::now();
 
     const double milliseconds =
         std::chrono::duration<double, std::milli>(finish - start).count() / iterations;
-    std::cout << "\nForward pass: " << std::fixed << std::setprecision(3) << milliseconds
-              << " ms  (" << std::setprecision(1) << 1000.0 / milliseconds << " images/s over "
-              << iterations << " iterations)\n";
+    std::cout << "\nBatch " << batch << ": " << std::fixed << std::setprecision(3) << milliseconds
+              << " ms per pass, " << std::setprecision(3) << milliseconds / batch
+              << " ms per image (" << std::setprecision(1) << 1000.0 * batch / milliseconds
+              << " images/s over " << iterations << " iterations)\n";
 }
 
 } // namespace
@@ -153,7 +167,10 @@ int main(int argc, char** argv) {
 
         const cuvit::WeightFile weights = cuvit::WeightFile::load(options.weights);
         const cuvit::VitConfig config;
-        cuvit::VisionTransformer model(config, weights);
+        if (options.batch < 1) {
+            throw std::runtime_error("--batch must be at least one");
+        }
+        cuvit::VisionTransformer model(config, weights, options.batch);
         std::cout << "Weights: " << weights.size() << " tensors, " << std::fixed
                   << std::setprecision(2)
                   << static_cast<double>(model.weight_bytes()) / (1024.0 * 1024.0)
@@ -179,7 +196,7 @@ int main(int argc, char** argv) {
         report_top(logits, options.top);
 
         if (options.benchmark > 0) {
-            run_benchmark(model, input, options.benchmark);
+            run_benchmark(model, input, options.benchmark, options.batch);
         }
         return 0;
     } catch (const std::exception& error) {
