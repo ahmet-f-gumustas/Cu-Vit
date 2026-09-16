@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="258" viewBox="0 0 760 258" role="img" aria-label="One row of the packed Q K V projection, 576 values wide, split into three groups of three heads. Attention reads each head as a column slice in place, with a leading dimension of 576 and an offset of the head index times 64.">
+<rect width="760" height="258" fill="#fcfcfb"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<text x="24" y="28" font-size="15" font-weight="600" fill="#0b0b0b">One row of the packed projection</text>
+<text x="24" y="49" font-size="11.5" fill="#52514e">A single GEMM writes 576 values per token — three parts of three heads.</text>
+<text x="24" y="66" font-size="11.5" fill="#52514e">Nothing is gathered afterwards: every head is a column slice read in place.</text>
+<text x="24" y="84" font-size="12" font-weight="600" fill="#0b0b0b">Q<tspan font-weight="400" font-size="10.5" fill="#52514e">   offset 0</tspan></text>
+<rect x="24" y="92" width="76" height="34" rx="3" fill="#2a78d6"/>
+<text x="62.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 0</text>
+<rect x="102" y="92" width="76" height="34" rx="3" fill="#2a78d6"/>
+<text x="140.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 1</text>
+<rect x="180" y="92" width="76" height="34" rx="3" fill="#2a78d6"/>
+<text x="218.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 2</text>
+<text x="274" y="84" font-size="12" font-weight="600" fill="#0b0b0b">K<tspan font-weight="400" font-size="10.5" fill="#52514e">   offset 192</tspan></text>
+<rect x="274" y="92" width="76" height="34" rx="3" fill="#eb6834"/>
+<text x="312.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 0</text>
+<rect x="352" y="92" width="76" height="34" rx="3" fill="#eb6834"/>
+<text x="390.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 1</text>
+<rect x="430" y="92" width="76" height="34" rx="3" fill="#eb6834"/>
+<text x="468.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 2</text>
+<text x="524" y="84" font-size="12" font-weight="600" fill="#0b0b0b">V<tspan font-weight="400" font-size="10.5" fill="#52514e">   offset 384</tspan></text>
+<rect x="524" y="92" width="76" height="34" rx="3" fill="#b9b8b1"/>
+<text x="562.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 0</text>
+<rect x="602" y="92" width="76" height="34" rx="3" fill="#b9b8b1"/>
+<text x="640.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 1</text>
+<rect x="680" y="92" width="76" height="34" rx="3" fill="#b9b8b1"/>
+<text x="718.0" y="114" font-size="10.5" text-anchor="middle" fill="#fcfcfb">head 2</text>
+<path d="M135.0,132 l5,6 l5,-6 z" fill="#0b0b0b"/>
+<text x="24" y="166" font-size="12" font-weight="600" fill="#0b0b0b">Reading Q for head 1</text>
+<text x="24" y="188" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#52514e">base = qkv + 0·192 + 1·64</text>
+<text x="24" y="206" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#52514e">lda = 576   — skip to the next token</text>
+<text x="24" y="224" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#52514e">extent = 197 × 64</text>
+<text x="354" y="166" font-size="12" font-weight="600" fill="#0b0b0b">What the two GEMMs do</text>
+<text x="354" y="188" font-size="11.5" fill="#0b0b0b" font-weight="600">Q × Kᵀ</text>
+<text x="402" y="188" font-size="11.5" fill="#52514e">reads two column slices, one GEMM per head</text>
+<text x="354" y="206" font-size="11.5" fill="#0b0b0b" font-weight="600">× V</text>
+<text x="402" y="206" font-size="11.5" fill="#52514e">writes into [tokens, heads · head_dim] — the</text>
+<text x="354" y="224" font-size="11.5" fill="#0b0b0b" font-weight="600"></text>
+<text x="354" y="224" font-size="11.5" fill="#52514e">layout the output projection already expects</text>
+</g></svg>

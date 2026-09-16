@@ -8,8 +8,13 @@ The project maps transformer operations directly to CUDA kernels instead of hidi
 them behind a high-level deep learning framework.
 
 > **Status:** End-to-end inference works. ViT-Tiny/16 runs on hand-written CUDA
-> kernels and reproduces PyTorch's logits to within 1.6e-5. Kernel fusion,
-> mixed precision, and batching are not done yet.
+> kernels and reproduces PyTorch's logits to within 1.6e-5. Mixed precision,
+> tensor cores, and batching are not done yet.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/latency-dark.svg">
+  <img alt="Forward pass at batch size one: PyTorch with cuBLAS and cuDNN 1.691 ms, Cu-Vit 0.3.0 1.887 ms, Cu-Vit 0.2.0 2.363 ms." src="docs/latency-light.svg">
+</picture>
 
 ## Current capabilities
 
@@ -61,22 +66,84 @@ before performance optimization begins.
 The first inference milestone targets ViT-Tiny/16 with a 224x224 input, batch size
 one, and FP32 arithmetic. Training and backpropagation are outside the initial scope.
 
-The planned inference path is:
+The inference path, with the shape at each step:
 
-```text
-Image (C x H x W)
-        |
-        v
-Patch embedding + CLS token + positional embedding
-        |
-        v
-Transformer encoder blocks
-  LayerNorm -> Multi-head attention -> residual
-  LayerNorm -> MLP/GELU          -> residual
-        |
-        v
-LayerNorm + classification head -> logits
+```mermaid
+flowchart TD
+    IMG["<b>Image</b><br/>3 x 224 x 224"]
+    GATHER["<b>Patch gather</b><br/><i>extract_patches</i>"]
+    PATCH["<b>Patch matrix</b><br/>196 x 768"]
+    EMBED["<b>Patch embedding</b><br/><i>gemm</i> against the flattened conv weight"]
+    CLS["<b>Prepend class token</b><br/>+ add positional embedding"]
+    TOK["<b>Token stream</b><br/>197 x 192"]
+    BLOCK["<b>12 x encoder block</b>"]
+    NORM["<b>Final layer norm</b><br/><i>layer_norm</i>"]
+    HEAD["<b>Classification head</b><br/><i>gemm</i> on the class token alone"]
+    OUT["<b>Logits</b><br/>1000"]
+
+    IMG --> GATHER --> PATCH --> EMBED --> CLS --> TOK --> BLOCK
+    BLOCK --> NORM --> HEAD --> OUT
+    BLOCK -.->|residual stream, shape never changes| TOK
 ```
+
+One encoder block. The two residual additions and the MLP's GELU are folded into
+the preceding GEMM's store rather than run as separate kernels:
+
+```mermaid
+flowchart TD
+    IN(["tokens  197 x 192"])
+    LN1["<b>layer_norm</b>"]
+    QKV["<b>gemm</b> → 197 x 576<br/>Q, K and V interleaved"]
+    LOGITS["<b>gemm</b> Q x K^T, batched over 3 heads<br/>scaled by 1/sqrt(64) → 3 x 197 x 197"]
+    SM["<b>softmax</b> over each row"]
+    CTX["<b>gemm</b> x V → 197 x 192"]
+    PROJ["<b>gemm</b> output projection<br/><i>epilogue: accumulate</i>"]
+    LN2["<b>layer_norm</b>"]
+    FC1["<b>gemm</b> → 197 x 768<br/><i>epilogue: GELU</i>"]
+    FC2["<b>gemm</b> → 197 x 192<br/><i>epilogue: accumulate</i>"]
+    OUT(["tokens  197 x 192"])
+
+    IN --> LN1 --> QKV --> LOGITS --> SM --> CTX --> PROJ
+    PROJ -->|+= into the residual stream| LN2
+    LN2 --> FC1 --> FC2
+    FC2 -->|+= into the residual stream| OUT
+```
+
+Eight kernel launches per block, ninety-six for the encoder, 113 for the whole
+pass.
+
+## The forward pass, stage by stage
+
+Every stage, the kernel that runs it, and the shape it produces. `T` is the 197
+tokens -- 196 patches plus the class token -- and `E` the 192-wide embedding.
+
+| Stage | Kernel | Reads | Writes | Launches |
+| --- | --- | --- | --- | --- |
+| Patch gather | `extract_patches` | `3 x 224 x 224` | `196 x 768` | 1 |
+| Patch embedding | `gemm` | `196 x 768`, `192 x 768` | `196 x E` | 1 |
+| Class token | `cudaMemcpyAsync` | `1 x E` | row 0 | 1 |
+| Positional embedding | `add` | `T x E` | `T x E` | 1 |
+| **Per block, 12 times** | | | | **8** |
+| &nbsp;&nbsp;Layer norm | `layer_norm` | `T x E` | `T x E` | |
+| &nbsp;&nbsp;QKV projection | `gemm` | `T x E`, `3E x E` | `T x 3E` | |
+| &nbsp;&nbsp;Attention logits | `gemm` batched x3 | two slices of `T x 3E` | `3 x T x T` | |
+| &nbsp;&nbsp;Softmax | `softmax` | `3T x T` | `3T x T` | |
+| &nbsp;&nbsp;Attention context | `gemm` batched x3 | `3 x T x T`, a slice of `T x 3E` | `T x E` | |
+| &nbsp;&nbsp;Output projection | `gemm` **+= epilogue** | `T x E`, `E x E` | `T x E` | |
+| &nbsp;&nbsp;Layer norm | `layer_norm` | `T x E` | `T x E` | |
+| &nbsp;&nbsp;MLP | `gemm` **GELU epilogue**, `gemm` **+=** | `T x E` | `T x E` | |
+| Final layer norm | `layer_norm` | `T x E` | `T x E` | 1 |
+| Classification head | `gemm` | row 0 of `T x E`, `1000 x E` | `1000` | 1 |
+
+Two things the table makes concrete. The residual stream is one buffer that
+never changes shape and is written in place by the GEMM epilogues, so a block
+allocates nothing. And attention never materializes a transposed copy: both
+batched GEMMs address the packed projection through a leading dimension.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/breakdown-dark.svg">
+  <img alt="GPU time per stage of a forward pass. proj plus fc2 plus patch embedding 1084.7 microseconds, mlp fc1 426.1, qkv projection 301.3, attention times V 181.4, Q times K transposed 157.2, softmax 72.3, layer norm 71.6, classifier head 15.2, patch gather 4.9, positional add 1.8." src="docs/breakdown-light.svg">
+</picture>
 
 ## Requirements
 
@@ -168,7 +235,7 @@ FP32 throughout:
 | Throughput | 530 images/s | 591 images/s |
 
 The top-5 predictions are identical. Median of seven runs of 400 iterations each,
-on an RTX 4070 Laptop GPU.
+on an RTX 4070 Laptop GPU. The chart is at the top of this file.
 
 Cu-Vit is 1.12x slower than the vendor libraries. Both are far from the card's
 15.6 TFLOPS: at batch size one this model is 2.51 GFLOP of work spread over 113
@@ -188,9 +255,10 @@ Halving the tile width doubles the block count at the same occupancy per block.
 Measured across the eight shapes this model issues, summed with their per-pass
 multiplicities:
 
-| Tile | 64x64 | **64x32** | 64x32 k8 | 128x32 | 32x32 | 96x32 | 128x64 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| us/pass | 2484 | **1738** | 1923 | 2410 | 2530 | 2192 | 2387 |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/tile-sweep-dark.svg">
+  <img alt="Total GEMM time per forward pass by tile size: 64x32 1738 microseconds, 64x32 with a K tile of 8 1923, 96x32 2192, 128x64 2387, 128x32 2410, 64x64 2484, 32x32 2530." src="docs/tile-sweep-light.svg">
+</picture>
 
 Picking the best tile per shape instead of one for all buys a further 6%, which
 is inside the run-to-run spread, so the kernel keeps a single tile.
@@ -314,6 +382,11 @@ interleaved as `[tokens, 3, heads, head_dim]`. Every later step reads slices of
 that buffer in place, through a leading dimension and a batch stride, so nothing
 is gathered or transposed between the projection and the output:
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/qkv-layout-dark.svg">
+  <img alt="One row of the packed projection: 576 values split into Q at offset 0, K at offset 192 and V at offset 384, each holding three heads of 64. Q for head 1 is read at base qkv plus 1 times 64, with a leading dimension of 576 and an extent of 197 by 64." src="docs/qkv-layout-light.svg">
+</picture>
+
 - `Q @ K^T` per head reads two column slices of the packed buffer
 - `attention @ V` writes straight into the `[tokens, heads * head_dim]` layout
   the output projection expects
@@ -345,8 +418,10 @@ Cu-Vit/
 │   ├── model/               # The ViT forward pass
 │   ├── runtime/             # Runtime, device, weight, and image utilities
 │   └── main.cpp             # Command-line classifier
+├── docs/                    # README figures, light and dark
 ├── tools/
-│   └── export_vit_weights.py  # timm checkpoint -> .cvw
+│   ├── export_vit_weights.py  # timm checkpoint -> .cvw
+│   └── render_charts.py       # regenerates docs/*.svg
 ├── tests/
 │   ├── reference/           # Naive CPU implementations kernels are judged against
 │   ├── test_utils.hpp       # Comparisons, seeded data, test entry point
@@ -374,6 +449,22 @@ Cu-Vit/
 - [x] Profile-driven GEMM tiling and epilogue fusion.
 - [ ] FP16/mixed precision and tensor cores.
 - [ ] Batched inference and a cuBLAS comparison harness.
+
+## Figures
+
+The figures in this file are generated, not drawn:
+
+```bash
+python3 tools/render_charts.py
+```
+
+Each one is emitted twice, stepped for a light and a dark surface rather than
+flipped, and embedded through `<picture>` so GitHub serves the right one. The
+SVG is written directly rather than through a plotting library, which is what
+keeps the marks exact and the whole set under 40 KB of diffable text. Colours
+were checked for contrast against their own surface and for separation under
+simulated colour-vision deficiency; every bar is also labelled with its value,
+so nothing depends on telling two colours apart.
 
 ## References
 

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="288" viewBox="0 0 760 288" role="img" aria-label="GEMM tile sweep. Total GEMM time per forward pass, lower is better. Eight shapes, weighted by how often each runs.">
+<rect width="760" height="288" fill="#fcfcfb"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<text x="16" y="28" font-size="15" font-weight="600" fill="#0b0b0b">GEMM tile sweep</text>
+<text x="16" y="48" font-size="11.5" fill="#52514e">Total GEMM time per forward pass, lower is better. Eight shapes, weighted by how often each runs.</text>
+<line x1="210" y1="56" x2="210" y2="276" stroke="#c3c2b7" stroke-width="1"/>
+<text x="200" y="78" font-size="11.5" text-anchor="end" fill="#52514e">64x32  (shipped)</text>
+<path d="M210,64h307.88a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-307.88z" fill="#2a78d6"/>
+<text x="531.88" y="78" font-size="11.5" fill="#0b0b0b">1,738 µs</text>
+<text x="200" y="108" font-size="11.5" text-anchor="end" fill="#52514e">64x32, K tile 8</text>
+<path d="M210,94h341.08a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-341.08z" fill="#b9b8b1"/>
+<text x="565.08" y="108" font-size="11.5" fill="#0b0b0b">1,923 µs</text>
+<text x="200" y="138" font-size="11.5" text-anchor="end" fill="#52514e">96x32</text>
+<path d="M210,124h389.35a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-389.35z" fill="#b9b8b1"/>
+<text x="613.35" y="138" font-size="11.5" fill="#0b0b0b">2,192 µs</text>
+<text x="200" y="168" font-size="11.5" text-anchor="end" fill="#52514e">128x64</text>
+<path d="M210,154h424.34a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-424.34z" fill="#b9b8b1"/>
+<text x="648.34" y="168" font-size="11.5" fill="#0b0b0b">2,387 µs</text>
+<text x="200" y="198" font-size="11.5" text-anchor="end" fill="#52514e">128x32</text>
+<path d="M210,184h428.47a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-428.47z" fill="#b9b8b1"/>
+<text x="652.47" y="198" font-size="11.5" fill="#0b0b0b">2,410 µs</text>
+<text x="200" y="228" font-size="11.5" text-anchor="end" fill="#52514e">64x64  (previous)</text>
+<path d="M210,214h441.75a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-441.75z" fill="#eb6834"/>
+<text x="665.75" y="228" font-size="11.5" fill="#0b0b0b">2,484 µs</text>
+<text x="200" y="258" font-size="11.5" text-anchor="end" fill="#52514e">32x32</text>
+<path d="M210,244h450.00a4,4 0 0 1 4,4v12a4,4 0 0 1 -4,4h-450.00z" fill="#b9b8b1"/>
+<text x="674.00" y="258" font-size="11.5" fill="#0b0b0b">2,530 µs</text>
+</g></svg>
