@@ -8,20 +8,37 @@
 namespace cuvit {
 namespace {
 
-// One block computes a 64x64 output tile from 16-deep slices of K. Each of the
-// 256 threads owns a 4x4 micro-tile, so every value loaded into shared memory is
-// reused four times from registers. A thread-per-output kernel reloads the same
-// operands 64 times instead.
+// One block computes a 64x32 output tile from 16-deep slices of K. Each of the
+// 256 threads owns a 4x2 micro-tile, so every value staged in shared memory is
+// reused from registers rather than reloaded.
+//
+// The tile is deliberately narrow. At batch size one a ViT-Tiny GEMM is small:
+// the largest is [197, 768] and the most frequent is [197, 192], which a 64x64
+// tile covers in 12 blocks. Spread over 36 SMs that measured 0.08 waves per
+// multiprocessor, with the SMs at 8% throughput and DRAM at 5% -- neither
+// compute nor bandwidth bound, simply not enough blocks to occupy the machine.
+// Halving the tile width doubles the block count at the same occupancy per
+// block, which is worth 1.43x across the shapes this model issues.
+//
+// Wider tiles win once the matrices are large enough to fill the GPU anyway, so
+// this choice belongs with batch-size-one inference, not with the kernel.
 constexpr int kTileM = 64;
-constexpr int kTileN = 64;
+constexpr int kTileN = 32;
 constexpr int kTileK = 16;
-constexpr int kThreadTile = 4;
-constexpr int kBlockDim = kTileM / kThreadTile; // 16 threads per side, 256 total
+constexpr int kThreadTileM = 4;
+constexpr int kThreadTileN = 2;
+constexpr int kBlockRows = kTileM / kThreadTileM;
+constexpr int kBlockColumns = kTileN / kThreadTileN;
+constexpr int kThreads = kBlockRows * kBlockColumns;
 
-__global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
+static_assert(kTileM * kTileK % kThreads == 0, "the A tile must divide across the block");
+static_assert(kTileK * kTileN % kThreads == 0, "the B tile must divide across the block");
+
+__global__ __launch_bounds__(kThreads) void gemm_kernel(
     const float* __restrict__ a, const float* __restrict__ b, const float* __restrict__ bias,
     float* __restrict__ c, int m, int n, int k, float alpha, bool transposed, std::int64_t stride_a,
-    std::int64_t stride_b, std::int64_t stride_c, int lda, int ldb, int ldc) {
+    std::int64_t stride_b, std::int64_t stride_c, int lda, int ldb, int ldc, bool accumulate,
+    bool apply_gelu) {
     __shared__ float tile_a[kTileK][kTileM];
     __shared__ float tile_b[kTileK][kTileN];
 
@@ -32,18 +49,18 @@ __global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
 
     const int row_origin = blockIdx.y * kTileM;
     const int column_origin = blockIdx.x * kTileN;
-    const int thread_row = threadIdx.y * kThreadTile;
-    const int thread_column = threadIdx.x * kThreadTile;
-    const int linear_thread = threadIdx.y * kBlockDim + threadIdx.x;
+    const int thread_row = threadIdx.y * kThreadTileM;
+    const int thread_column = threadIdx.x * kThreadTileN;
+    const int linear_thread = threadIdx.y * kBlockColumns + threadIdx.x;
 
-    float accumulator[kThreadTile][kThreadTile] = {};
+    float accumulator[kThreadTileM][kThreadTileN] = {};
 
     for (int k_origin = 0; k_origin < k; k_origin += kTileK) {
         // 256 threads stage a 64x16 slice of A and a 16x64 slice of B, four
         // elements each. A is transposed into shared memory so the inner loop
         // reads down a column without a stride.
-        for (int load = 0; load < kTileM * kTileK / (kBlockDim * kBlockDim); ++load) {
-            const int index = linear_thread + load * kBlockDim * kBlockDim;
+        for (int load = 0; load < kTileM * kTileK / kThreads; ++load) {
+            const int index = linear_thread + load * kThreads;
             const int local_row = index / kTileK;
             const int local_k = index % kTileK;
             const int global_row = row_origin + local_row;
@@ -54,8 +71,8 @@ __global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
                     : 0.0F;
         }
 
-        for (int load = 0; load < kTileK * kTileN / (kBlockDim * kBlockDim); ++load) {
-            const int index = linear_thread + load * kBlockDim * kBlockDim;
+        for (int load = 0; load < kTileK * kTileN / kThreads; ++load) {
+            const int index = linear_thread + load * kThreads;
             const int local_k = index / kTileN;
             const int local_column = index % kTileN;
             const int global_k = k_origin + local_k;
@@ -72,14 +89,16 @@ __global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
         __syncthreads();
 
         for (int step = 0; step < kTileK; ++step) {
-            float fragment_a[kThreadTile];
-            float fragment_b[kThreadTile];
-            for (int i = 0; i < kThreadTile; ++i) {
+            float fragment_a[kThreadTileM];
+            float fragment_b[kThreadTileN];
+            for (int i = 0; i < kThreadTileM; ++i) {
                 fragment_a[i] = tile_a[step][thread_row + i];
-                fragment_b[i] = tile_b[step][thread_column + i];
             }
-            for (int i = 0; i < kThreadTile; ++i) {
-                for (int j = 0; j < kThreadTile; ++j) {
+            for (int j = 0; j < kThreadTileN; ++j) {
+                fragment_b[j] = tile_b[step][thread_column + j];
+            }
+            for (int i = 0; i < kThreadTileM; ++i) {
+                for (int j = 0; j < kThreadTileN; ++j) {
                     accumulator[i][j] += fragment_a[i] * fragment_b[j];
                 }
             }
@@ -88,12 +107,12 @@ __global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
         __syncthreads();
     }
 
-    for (int i = 0; i < kThreadTile; ++i) {
+    for (int i = 0; i < kThreadTileM; ++i) {
         const int row = row_origin + thread_row + i;
         if (row >= m) {
             continue;
         }
-        for (int j = 0; j < kThreadTile; ++j) {
+        for (int j = 0; j < kThreadTileN; ++j) {
             const int column = column_origin + thread_column + j;
             if (column >= n) {
                 continue;
@@ -102,7 +121,12 @@ __global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
             if (bias != nullptr) {
                 value += bias[column];
             }
-            c[static_cast<std::int64_t>(row) * ldc + column] = value;
+            if (apply_gelu) {
+                // The erf form, matching nn.GELU(approximate='none').
+                value = 0.5F * value * (1.0F + erff(value * 0.7071067811865475F));
+            }
+            const std::int64_t offset = static_cast<std::int64_t>(row) * ldc + column;
+            c[offset] = accumulate ? c[offset] + value : value;
         }
     }
 }
@@ -112,7 +136,7 @@ __global__ __launch_bounds__(kBlockDim* kBlockDim) void gemm_kernel(
 void launch_gemm(const float* a, const float* b, const float* bias, float* c, int m, int n, int k,
                  GemmLayout layout, float alpha, int batch, std::int64_t stride_a,
                  std::int64_t stride_b, std::int64_t stride_c, int lda, int ldb, int ldc,
-                 cudaStream_t stream) {
+                 GemmEpilogue epilogue, cudaStream_t stream) {
     if (m == 0 || n == 0 || batch == 0) {
         return;
     }
@@ -137,13 +161,14 @@ void launch_gemm(const float* a, const float* b, const float* bias, float* c, in
         throw std::invalid_argument("A GEMM leading dimension is smaller than its row");
     }
 
-    const dim3 block(kBlockDim, kBlockDim);
+    const dim3 block(kBlockColumns, kBlockRows);
     const dim3 grid(static_cast<unsigned int>((n + kTileN - 1) / kTileN),
                     static_cast<unsigned int>((m + kTileM - 1) / kTileM),
                     static_cast<unsigned int>(batch));
 
     gemm_kernel<<<grid, block, 0, stream>>>(a, b, bias, c, m, n, k, alpha, transposed, stride_a,
-                                            stride_b, stride_c, lda, ldb, ldc);
+                                            stride_b, stride_c, lda, ldb, ldc, epilogue.accumulate,
+                                            epilogue.gelu);
     CUVIT_CUDA_CHECK(cudaGetLastError());
 }
 

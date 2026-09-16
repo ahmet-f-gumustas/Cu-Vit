@@ -20,6 +20,21 @@ enum class GemmLayout {
     kTransposed,
 };
 
+/// What a GEMM does to each result before storing it.
+///
+/// Folding these into the store saves a second kernel and, more importantly, a
+/// full read-modify-write pass over the output. At batch size one the matrices
+/// are small enough that a launch and its memory traffic cost as much as the
+/// arithmetic, so an epilogue that would be rounding error on a large GEMM is
+/// worth having here.
+struct GemmEpilogue {
+    /// Add into the existing contents of C rather than overwriting them, which
+    /// is what a residual connection needs.
+    bool accumulate = false;
+    /// Apply GELU after the bias, as the first MLP layer does.
+    bool gelu = false;
+};
+
 /// Batched general matrix multiply with an optional bias and scale.
 ///
 ///   C[b][m][n] = alpha * sum_k A[b][m][k] * B_layout[b][k][n] + bias[n]
@@ -40,7 +55,7 @@ enum class GemmLayout {
 void launch_gemm(const float* a, const float* b, const float* bias, float* c, int m, int n, int k,
                  GemmLayout layout, float alpha = 1.0F, int batch = 1, std::int64_t stride_a = 0,
                  std::int64_t stride_b = 0, std::int64_t stride_c = 0, int lda = 0, int ldb = 0,
-                 int ldc = 0, cudaStream_t stream = nullptr);
+                 int ldc = 0, GemmEpilogue epilogue = {}, cudaStream_t stream = nullptr);
 
 /// Layer normalization over the last axis, with a per-element affine transform.
 ///
