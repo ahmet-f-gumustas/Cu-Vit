@@ -6,7 +6,7 @@ endif()
 
 project(
     CuVit
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "A Vision Transformer inference engine implemented in CUDA C++"
     LANGUAGES CXX CUDA
 )
@@ -37,8 +37,12 @@ function(cuvit_apply_common_options target_name)
 endfunction()
 
 add_library(cuvit STATIC
+    src/kernels/gemm.cu
+    src/kernels/normalization.cu
     src/kernels/vector_add.cu
     src/runtime/device_info.cu
+    src/model/vit.cu
+    src/runtime/image.cpp
     src/runtime/weights.cpp
 )
 
@@ -64,11 +68,15 @@ if(CUVIT_BUILD_TESTS)
     set(cuvit_test_names
         device_arena_test
         device_buffer_test
+        elementwise_test
+        gemm_test
+        image_test
         host_buffer_test
         numerics_test
         stream_test
         tensor_test
         vector_add_test
+        vit_test
         weights_test
     )
 

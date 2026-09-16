@@ -7,9 +7,9 @@ Transformer architecture ([Dosovitskiy et al., 2020](https://arxiv.org/abs/2010.
 The project maps transformer operations directly to CUDA kernels instead of hiding
 them behind a high-level deep learning framework.
 
-> **Status:** Early development. The CUDA build, runtime error handling, GPU memory
-> utilities, smoke executable, and initial test suite are operational. Model kernels
-> and end-to-end inference are not implemented yet.
+> **Status:** End-to-end inference works. ViT-Tiny/16 runs on hand-written CUDA
+> kernels and reproduces PyTorch's logits to within 1.6e-5. Kernel fusion,
+> mixed precision, and batching are not done yet.
 
 ## Current capabilities
 
@@ -30,8 +30,12 @@ them behind a high-level deep learning framework.
 - Asynchronous `_async` counterparts for every transfer, so a full
   host-to-device, kernel, device-to-host path can run on one stream.
 - Active CUDA device discovery and capability reporting, cached per device.
-- A vector-add kernel used to verify compilation, launch, synchronization, and data
-  transfer end to end.
+- Hand-written kernels for tiled batched GEMM, LayerNorm, softmax, GELU, residual
+  addition, and patch extraction.
+- A complete ViT forward pass: patch embedding, class token, positional
+  embedding, twelve encoder blocks of multi-head attention and MLP, and the
+  classification head.
+- Image preprocessing and a command-line classifier.
 - CTest coverage for memory ownership, data transfers, bounds checks, error
   propagation, page-locked allocation, stream lifetime, asynchronous pipelines,
   and kernel correctness across boundary sizes.
@@ -122,24 +126,52 @@ Disable tests when only the library and executable are needed:
 cmake -S . -B build -DCUVIT_BUILD_TESTS=OFF
 ```
 
-## Run the CUDA smoke test
+## Run inference
 
-The current executable reports the active GPU and verifies a complete
-host-to-device, kernel launch, synchronization, and device-to-host round trip:
+Export the weights once, then classify:
 
 ```bash
-./build/cu-vit
-```
+python3 tools/export_vit_weights.py --model vit_tiny_patch16_224 --output vit_tiny.cvw
 
-Example output:
+# From an image. Convert to binary PPM first:
+#   ffmpeg -i photo.jpg -pix_fmt rgb24 photo.ppm
+./build/cu-vit --weights vit_tiny.cvw --image photo.ppm --top 5
+
+# From an already preprocessed float32 tensor, 3x224x224 planar:
+./build/cu-vit --weights vit_tiny.cvw --raw input.bin --benchmark 200
+```
 
 ```text
 Cu-Vit
-GPU: NVIDIA GeForce RTX 4070 Laptop GPU
-Compute capability: 8.9
-Global memory: 7.65 GiB
-CUDA smoke test: PASS
+GPU: NVIDIA GeForce RTX 4070 Laptop GPU (compute 8.9)
+Weights: 152 tensors, 21.81 MiB; activations 2.61 MiB
+
+Top 5:
+   646     7.2046    9.85%
+   794     6.7662    6.36%
+   971     6.5440    5.09%
+   815     6.5097    4.92%
+   701     6.2187    3.68%
+
+Forward pass: 2.363 ms  (423.2 images/s over 200 iterations)
 ```
+
+## Accuracy and speed
+
+Against `timm`'s `vit_tiny_patch16_224` on the same input, batch size one,
+FP32 throughout:
+
+| | Cu-Vit | PyTorch (cuBLAS/cuDNN) |
+| --- | --- | --- |
+| Largest logit difference | 1.6e-05 | reference |
+| Forward pass | 2.363 ms | 1.729 ms |
+| Throughput | 423 images/s | 579 images/s |
+
+The top-5 predictions are identical. Measured on an RTX 4070 Laptop GPU.
+
+Cu-Vit is 1.37x slower than the vendor libraries, which is where hand-written
+kernels with no fusion and no tensor cores land. The gap is the remaining
+optimization work, not a correctness problem.
 
 ## Tests
 
@@ -245,6 +277,22 @@ rather than silently producing a wrong layout.
 matching what `cudaMalloc` itself guarantees. ViT-Tiny's 152 weight tensors then
 cost one allocation instead of 152.
 
+## Attention without copies
+
+The three projections a block needs come from one GEMM, which leaves Q, K and V
+interleaved as `[tokens, 3, heads, head_dim]`. Every later step reads slices of
+that buffer in place, through a leading dimension and a batch stride, so nothing
+is gathered or transposed between the projection and the output:
+
+- `Q @ K^T` per head reads two column slices of the packed buffer
+- `attention @ V` writes straight into the `[tokens, heads * head_dim]` layout
+  the output projection expects
+
+A patch embedding is a convolution whose kernel equals its stride, so it visits
+every input element exactly once. It runs as a gather into a
+`[patches, channels * patch * patch]` matrix followed by a single GEMM against
+the flattened convolution weight, rather than as a general convolution.
+
 ## Project structure
 
 ```text
@@ -255,14 +303,18 @@ Cu-Vit/
 │   ├── device_info.hpp      # Active device metadata
 │   ├── host_buffer.hpp      # Move-only page-locked host memory
 │   ├── device_arena.hpp     # Aligned bump allocator over one allocation
+│   ├── image.hpp            # PPM loading and preprocessing
+│   ├── kernels.hpp          # Kernel launchers
 │   ├── stream.hpp           # Move-only CUDA stream owner
 │   ├── tensor.hpp           # Non-owning strided view
 │   ├── vector_add.hpp       # Smoke-kernel interface
+│   ├── vit.hpp              # The model
 │   └── weights.hpp          # Weight file format and loader
 ├── src/
 │   ├── kernels/             # CUDA kernels
-│   ├── runtime/             # Runtime and device utilities
-│   └── main.cpp             # Current smoke executable
+│   ├── model/               # The ViT forward pass
+│   ├── runtime/             # Runtime, device, weight, and image utilities
+│   └── main.cpp             # Command-line classifier
 ├── tools/
 │   └── export_vit_weights.py  # timm checkpoint -> .cvw
 ├── tests/
@@ -282,14 +334,15 @@ Cu-Vit/
 - [x] Test support: seeded data, CPU references, tolerance-aware comparison.
 - [x] Tensor shape, layout, and view abstractions.
 - [x] Versioned weight format and pretrained ViT weight exporter.
-- [ ] Tiled GEMM kernel with a cuBLAS reference.
-- [ ] LayerNorm, GELU, and softmax kernels.
-- [ ] Patch embedding, CLS token, and positional encoding.
-- [ ] Multi-head self-attention.
-- [ ] MLP and transformer encoder block.
-- [ ] Full encoder stack and classification head.
-- [ ] Image preprocessing and end-to-end inference.
-- [ ] Benchmarks, kernel fusion, and FP16/mixed-precision optimization.
+- [x] Tiled batched GEMM with leading dimensions and a CPU reference.
+- [x] LayerNorm, GELU, and softmax kernels.
+- [x] Patch embedding, CLS token, and positional encoding.
+- [x] Multi-head self-attention.
+- [x] MLP and transformer encoder block.
+- [x] Full encoder stack and classification head.
+- [x] Image preprocessing and end-to-end inference.
+- [ ] Kernel fusion, FP16/mixed precision, and tensor cores.
+- [ ] Batched inference and a cuBLAS comparison harness.
 
 ## References
 
