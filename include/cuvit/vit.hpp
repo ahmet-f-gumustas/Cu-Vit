@@ -104,7 +104,6 @@ class VisionTransformer final {
     float* qkv_ = nullptr;
     float* attention_ = nullptr;
     float* context_ = nullptr;
-    float* projected_ = nullptr;
     float* hidden_ = nullptr;
 };
 

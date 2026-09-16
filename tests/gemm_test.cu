@@ -204,6 +204,114 @@ void test_zero_stride_shares_an_operand() {
     }
 }
 
+// The epilogue folds the residual addition and GELU into the store. Both are
+// exercised through the model, but only a direct test pins down what they do to
+// a single element.
+void test_accumulate_epilogue_adds_into_the_destination() {
+    constexpr int m = 70;
+    constexpr int n = 40;
+    constexpr int k = 24;
+    const std::size_t count = static_cast<std::size_t>(m) * n;
+
+    std::vector<float> a(static_cast<std::size_t>(m) * k);
+    std::vector<float> b(static_cast<std::size_t>(k) * n);
+    std::vector<float> bias(n);
+    std::vector<float> existing(count);
+    DataGenerator generator(404);
+    generator.normal(a.data(), a.size());
+    generator.normal(b.data(), b.size());
+    generator.normal(bias.data(), bias.size());
+    generator.normal(existing.data(), existing.size());
+
+    std::vector<float> product(count);
+    cuvit::reference::gemm(a.data(), b.data(), bias.data(), product.data(), m, n, k);
+    std::vector<float> expected(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        expected[index] = existing[index] + product[index];
+    }
+
+    cuvit::DeviceBuffer<float> device_a(a.size());
+    cuvit::DeviceBuffer<float> device_b(b.size());
+    cuvit::DeviceBuffer<float> device_bias(bias.size());
+    cuvit::DeviceBuffer<float> device_c(count);
+    device_a.copy_from_host(a.data(), a.size());
+    device_b.copy_from_host(b.data(), b.size());
+    device_bias.copy_from_host(bias.data(), bias.size());
+    device_c.copy_from_host(existing.data(), existing.size());
+
+    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(), m, n,
+                       k, GemmLayout::kNoTranspose, 1.0F, 1, 0, 0, 0, 0, 0, 0,
+                       {/*accumulate=*/true});
+    CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<float> actual(count);
+    device_c.copy_to_host(actual.data(), count);
+
+    const std::vector<float> scale =
+        cuvit::reference::gemm_term_magnitudes(a.data(), b.data(), m, n, k, false);
+    cuvit::testing::require_close_scaled(actual.data(), expected.data(), scale.data(), count,
+                                         "accumulate epilogue", 1.0e-6, 1.0e-5);
+
+    // Without the epilogue the same call must overwrite instead, or the flag
+    // would be doing nothing and the test above would pass on stale data.
+    device_c.copy_from_host(existing.data(), existing.size());
+    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(), m, n,
+                       k, GemmLayout::kNoTranspose);
+    CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
+    device_c.copy_to_host(actual.data(), count);
+    cuvit::testing::require_close_scaled(actual.data(), product.data(), scale.data(), count,
+                                         "default epilogue overwrites", 1.0e-6, 1.0e-5);
+}
+
+void test_gelu_epilogue_matches_the_standalone_kernel() {
+    constexpr int m = 33;
+    constexpr int n = 96;
+    constexpr int k = 48;
+    const std::size_t count = static_cast<std::size_t>(m) * n;
+
+    std::vector<float> a(static_cast<std::size_t>(m) * k);
+    std::vector<float> b(static_cast<std::size_t>(k) * n);
+    std::vector<float> bias(n);
+    DataGenerator generator(505);
+    generator.normal(a.data(), a.size());
+    generator.normal(b.data(), b.size());
+    generator.normal(bias.data(), bias.size());
+
+    std::vector<float> expected(count);
+    cuvit::reference::gemm(a.data(), b.data(), bias.data(), expected.data(), m, n, k);
+    cuvit::reference::gelu(expected.data(), expected.data(), count);
+
+    cuvit::DeviceBuffer<float> device_a(a.size());
+    cuvit::DeviceBuffer<float> device_b(b.size());
+    cuvit::DeviceBuffer<float> device_bias(bias.size());
+    cuvit::DeviceBuffer<float> device_c(count);
+    device_a.copy_from_host(a.data(), a.size());
+    device_b.copy_from_host(b.data(), b.size());
+    device_bias.copy_from_host(bias.data(), bias.size());
+
+    cuvit::launch_gemm(device_a.data(), device_b.data(), device_bias.data(), device_c.data(), m, n,
+                       k, GemmLayout::kNoTranspose, 1.0F, 1, 0, 0, 0, 0, 0, 0,
+                       {/*accumulate=*/false, /*gelu=*/true});
+    CUVIT_CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<float> actual(count);
+    device_c.copy_to_host(actual.data(), count);
+    cuvit::testing::require_close(actual.data(), expected.data(), count, "GELU epilogue", 1.0e-4,
+                                  1.0e-5);
+
+    // The epilogue must apply GELU after the bias, not before: the two orders
+    // differ everywhere the bias is not zero.
+    std::vector<float> wrong_order(count);
+    cuvit::reference::gemm(a.data(), b.data(), nullptr, wrong_order.data(), m, n, k);
+    cuvit::reference::gelu(wrong_order.data(), wrong_order.data(), count);
+    for (std::size_t index = 0; index < count; ++index) {
+        wrong_order[index] += bias[index % static_cast<std::size_t>(n)];
+    }
+    require(
+        !cuvit::testing::compare_close(actual.data(), wrong_order.data(), count, 1.0e-3, 1.0e-3),
+        "the GELU epilogue applied the bias in the wrong order");
+}
+
 void test_degenerate_and_invalid_arguments() {
     cuvit::DeviceBuffer<float> buffer(16);
 
@@ -266,6 +374,8 @@ CUVIT_TEST_MAIN("gemm_test", {
     test_alpha_scales_the_product();
     test_batched_strides();
     test_zero_stride_shares_an_operand();
+    test_accumulate_epilogue_adds_into_the_destination();
+    test_gelu_epilogue_matches_the_standalone_kernel();
     test_degenerate_and_invalid_arguments();
     test_zero_k_produces_the_bias();
 })

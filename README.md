@@ -144,7 +144,7 @@ python3 tools/export_vit_weights.py --model vit_tiny_patch16_224 --output vit_ti
 ```text
 Cu-Vit
 GPU: NVIDIA GeForce RTX 4070 Laptop GPU (compute 8.9)
-Weights: 152 tensors, 21.81 MiB; activations 2.61 MiB
+Weights: 152 tensors, 21.81 MiB; activations 2.46 MiB
 
 Top 5:
    646     7.2046    9.85%
@@ -153,7 +153,7 @@ Top 5:
    815     6.5097    4.92%
    701     6.2187    3.68%
 
-Forward pass: 2.363 ms  (423.2 images/s over 200 iterations)
+Forward pass: 1.887 ms  (530.0 images/s over 400 iterations)
 ```
 
 ## Accuracy and speed
@@ -164,14 +164,44 @@ FP32 throughout:
 | | Cu-Vit | PyTorch (cuBLAS/cuDNN) |
 | --- | --- | --- |
 | Largest logit difference | 1.6e-05 | reference |
-| Forward pass | 2.363 ms | 1.729 ms |
-| Throughput | 423 images/s | 579 images/s |
+| Forward pass | 1.887 ms | 1.691 ms |
+| Throughput | 530 images/s | 591 images/s |
 
-The top-5 predictions are identical. Measured on an RTX 4070 Laptop GPU.
+The top-5 predictions are identical. Median of seven runs of 400 iterations each,
+on an RTX 4070 Laptop GPU.
 
-Cu-Vit is 1.37x slower than the vendor libraries, which is where hand-written
-kernels with no fusion and no tensor cores land. The gap is the remaining
-optimization work, not a correctness problem.
+Cu-Vit is 1.12x slower than the vendor libraries. Both are far from the card's
+15.6 TFLOPS: at batch size one this model is 2.51 GFLOP of work spread over 113
+kernel launches, so Cu-Vit reaches 1.33 TFLOPS and PyTorch 1.48. The problem is
+too small to fill the GPU, which is what the remaining optimization work has to
+address -- batching, or fewer and larger kernels.
+
+## Why the tile is 64x32
+
+The first working version used a 64x64 tile and took 2.363 ms. Profiling said
+the GEMM was 91.7% of GPU time, and `ncu` said why: the most frequent shape,
+`[197, 192]`, is covered by 12 blocks, which over 36 SMs measured **0.08 waves per
+multiprocessor**, with the SMs at 8% throughput and DRAM at 5%. Neither compute
+nor bandwidth bound -- simply not enough blocks to occupy the machine.
+
+Halving the tile width doubles the block count at the same occupancy per block.
+Measured across the eight shapes this model issues, summed with their per-pass
+multiplicities:
+
+| Tile | 64x64 | **64x32** | 64x32 k8 | 128x32 | 32x32 | 96x32 | 128x64 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| us/pass | 2484 | **1738** | 1923 | 2410 | 2530 | 2192 | 2387 |
+
+Picking the best tile per shape instead of one for all buys a further 6%, which
+is inside the run-to-run spread, so the kernel keeps a single tile.
+
+Wider tiles win once the matrices are large enough to fill the GPU anyway. This
+choice belongs with batch-size-one inference, not with the kernel.
+
+The residual addition and the MLP's GELU are folded into the GEMM's store, which
+removes 36 launches per pass and one scratch buffer. That is worth 1%, not the
+3.5% those kernels cost separately -- the epilogue absorbs most of it -- but it
+is consistent across runs and it is memory the model no longer needs.
 
 ## Tests
 
@@ -341,7 +371,8 @@ Cu-Vit/
 - [x] MLP and transformer encoder block.
 - [x] Full encoder stack and classification head.
 - [x] Image preprocessing and end-to-end inference.
-- [ ] Kernel fusion, FP16/mixed precision, and tensor cores.
+- [x] Profile-driven GEMM tiling and epilogue fusion.
+- [ ] FP16/mixed precision and tensor cores.
 - [ ] Batched inference and a cuBLAS comparison harness.
 
 ## References

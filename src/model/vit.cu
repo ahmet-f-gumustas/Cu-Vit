@@ -147,7 +147,6 @@ VisionTransformer::VisionTransformer(const VitConfig& config, const WeightFile& 
     reserve_activation(tokens * 3 * embed);              // packed qkv
     reserve_activation(config_.heads * tokens * tokens); // attention weights
     reserve_activation(tokens * embed);                  // attention context
-    reserve_activation(tokens * embed);                  // projection output
     reserve_activation(tokens * hidden);                 // mlp hidden
 
     activations_.reserve(activation_size);
@@ -158,7 +157,6 @@ VisionTransformer::VisionTransformer(const VitConfig& config, const WeightFile& 
     attention_ =
         activations_.allocate_raw<float>(static_cast<std::size_t>(config_.heads) * tokens * tokens);
     context_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * embed));
-    projected_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * embed));
     hidden_ = activations_.allocate_raw<float>(static_cast<std::size_t>(tokens * hidden));
 }
 
@@ -168,7 +166,6 @@ void VisionTransformer::run_block(const BlockWeights& block, float* tokens, cuda
     const int heads = config_.heads;
     const int head_dim = config_.head_dim();
     const int hidden = config_.mlp_hidden;
-    const std::int64_t token_elements = static_cast<std::int64_t>(token_count) * embed;
 
     // --- Attention -----------------------------------------------------------
     launch_layer_norm(tokens, block.norm1_gamma, block.norm1_beta, normalized_, token_count, embed,
@@ -176,7 +173,7 @@ void VisionTransformer::run_block(const BlockWeights& block, float* tokens, cuda
 
     // One projection produces Q, K and V interleaved as [tokens, 3, heads, head_dim].
     launch_gemm(normalized_, block.qkv_weight, block.qkv_bias, qkv_, token_count, 3 * embed, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, stream);
+                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {}, stream);
 
     const int qkv_row = 3 * embed;
     const float* const queries = qkv_;
@@ -192,7 +189,7 @@ void VisionTransformer::run_block(const BlockWeights& block, float* tokens, cuda
     launch_gemm(queries, keys, nullptr, attention_, token_count, token_count, head_dim,
                 GemmLayout::kTransposed, scale, heads, head_dim, head_dim,
                 static_cast<std::int64_t>(token_count) * token_count, qkv_row, qkv_row, token_count,
-                stream);
+                {}, stream);
 
     launch_softmax(attention_, attention_, heads * token_count, token_count, stream);
 
@@ -201,21 +198,21 @@ void VisionTransformer::run_block(const BlockWeights& block, float* tokens, cuda
     launch_gemm(attention_, values, nullptr, context_, token_count, head_dim, token_count,
                 GemmLayout::kNoTranspose, 1.0F, heads,
                 static_cast<std::int64_t>(token_count) * token_count, head_dim, head_dim,
-                token_count, qkv_row, embed, stream);
+                token_count, qkv_row, embed, {}, stream);
 
-    launch_gemm(context_, block.proj_weight, block.proj_bias, projected_, token_count, embed, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, stream);
-    launch_add(tokens, projected_, token_elements, stream);
+    // The projection accumulates straight into the residual stream, so the
+    // addition costs neither a launch nor a pass over the tokens.
+    launch_gemm(context_, block.proj_weight, block.proj_bias, tokens, token_count, embed, embed,
+                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {/*accumulate=*/true}, stream);
 
     // --- Feed forward --------------------------------------------------------
     launch_layer_norm(tokens, block.norm2_gamma, block.norm2_beta, normalized_, token_count, embed,
                       config_.layer_norm_epsilon, stream);
     launch_gemm(normalized_, block.fc1_weight, block.fc1_bias, hidden_, token_count, hidden, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, stream);
-    launch_gelu(hidden_, hidden_, static_cast<std::int64_t>(token_count) * hidden, stream);
-    launch_gemm(hidden_, block.fc2_weight, block.fc2_bias, projected_, token_count, embed, hidden,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, stream);
-    launch_add(tokens, projected_, token_elements, stream);
+                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0,
+                {/*accumulate=*/false, /*gelu=*/true}, stream);
+    launch_gemm(hidden_, block.fc2_weight, block.fc2_bias, tokens, token_count, embed, hidden,
+                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {/*accumulate=*/true}, stream);
 }
 
 void VisionTransformer::forward(const float* image, float* logits, cudaStream_t stream) {
@@ -236,7 +233,7 @@ void VisionTransformer::forward(const float* image, float* logits, cudaStream_t 
     // The classification token occupies row zero, so the patch embeddings are
     // written starting at row one and the two never need to be concatenated.
     launch_gemm(patches_, patch_weight_, patch_bias_, tokens_ + embed, patch_count, embed,
-                patch_elements, GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, stream);
+                patch_elements, GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {}, stream);
 
     CUVIT_CUDA_CHECK(cudaMemcpyAsync(tokens_, class_token_,
                                      static_cast<std::size_t>(embed) * sizeof(float),
@@ -255,7 +252,7 @@ void VisionTransformer::forward(const float* image, float* logits, cudaStream_t 
     // Only the classification token feeds the head; timm's default pooling for
     // this model is 'token', not a mean over the patches.
     launch_gemm(normalized_, head_weight_, head_bias_, logits, 1, config_.classes, embed,
-                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, stream);
+                GemmLayout::kTransposed, 1.0F, 1, 0, 0, 0, 0, 0, 0, {}, stream);
 }
 
 std::vector<float> VisionTransformer::forward(const std::vector<float>& image) {
